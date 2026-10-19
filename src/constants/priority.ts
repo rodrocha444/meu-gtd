@@ -52,17 +52,6 @@ export function getPriorityMeta(priority: TaskPriority) {
   );
 }
 
-export const GTD_CONTEXT_SUGGESTIONS = [
-  '@computador',
-  '@rua',
-  '@telefone',
-  '@casa',
-  '@evento',
-  '#aniversario',
-  '#energia_baixa',
-  '#foco_profundo',
-];
-
 import {
   Inbox,
   Calendar,
@@ -76,7 +65,7 @@ import {
 export const SMART_VIEW_ITEMS = [
   { id: 'inbox', label: 'Inbox', icon: Inbox, color: 'text-blue-400' },
   { id: 'today', label: 'Hoje', icon: Calendar, color: 'text-emerald-400' },
-  { id: 'next_7_days', label: 'Próximos 7 Dias', icon: CalendarDays, color: 'text-indigo-400' },
+  { id: 'next_days', label: 'Próximos Dias', icon: CalendarDays, color: 'text-indigo-400' },
   { id: 'next_actions', label: 'Ações Seguintes', icon: Zap, color: 'text-amber-400' },
   { id: 'waiting_for', label: 'Aguardando', icon: Clock, color: 'text-orange-400' },
   { id: 'someday', label: 'Algum Dia', icon: Sparkles, color: 'text-purple-400' },

@@ -1,4 +1,6 @@
 import type { RecurrenceMode, TaskPriority } from '../db/schema';
+import type { TaskReminder } from '../types/task';
+import { createDefaultReminder } from './reminder';
 import { buildRRule, formatRecurrenceBadge, type RecurrenceFrequency } from './recurrence';
 
 export interface ParsedQuickTask {
@@ -6,8 +8,6 @@ export interface ParsedQuickTask {
   cleanTitle: string;
   /** Prioridade extraída: 0 (Nenhuma), 1 (Baixa), 2 (Média), 3 (Alta) */
   priority: TaskPriority;
-  /** Tags (#energia_baixa) e contextos GTD (@computador, @rua) */
-  tags: string[];
   /** Nome ou slug da lista extraída via ~lista (null se não informada -> fallback para Inbox) */
   targetListQuery: string | null;
   /** Timestamp (ms) da data de vencimento extraída */
@@ -20,6 +20,10 @@ export interface ParsedQuickTask {
   recurrenceMode: RecurrenceMode;
   /** Rótulo amigável da recorrência detectada */
   detectedRecurrenceLabel: string | null;
+  /** Lembretes detectados via NLP */
+  reminders?: TaskReminder[];
+  /** Rótulo amigável do lembrete detectado */
+  detectedReminderLabel?: string | null;
 }
 
 const PRIORITY_MAP: Record<string, TaskPriority> = {
@@ -69,8 +73,8 @@ function atNineAM(base: Date, addDays = 0): Date {
  * Parser NLP de Captura Rápida estilo TickTick + GTD
  *
  * Exemplos suportados:
- * - "Enviar contrato assinado !alta @computador ~trabalho amanhã"
- * - "Aniversário da Mariana 25/10 todo ano #aniversario"
+ * - "Enviar contrato assinado !alta ~trabalho amanhã"
+ * - "Aniversário da Mariana 25/10 todo ano"
  * - "Limpar filtro do ar-condicionado a cada 30 dias após concluir"
  */
 export function parseQuickCaptureInput(
@@ -79,12 +83,13 @@ export function parseQuickCaptureInput(
 ): ParsedQuickTask {
   let workingText = rawInput;
   let priority: TaskPriority = 0;
-  const tagsSet = new Set<string>();
   let targetListQuery: string | null = null;
   let dueDate: number | null = null;
   let detectedDateLabel: string | null = null;
   let recurrenceRule: string | null = null;
   let recurrenceMode: RecurrenceMode = 'fixed';
+  const reminders: TaskReminder[] = [];
+  let detectedReminderLabel: string | null = null;
 
   // 1. Extrair Prioridade: !1, !2, !3, !alta, !média, !baixa, !urgente
   const priorityRegex = /(?:^|\s)!(0|1|2|3|baixa|low|m[eé]dia|med|alta|urgente|high|nenhuma)\b/gi;
@@ -97,14 +102,7 @@ export function parseQuickCaptureInput(
     return ' ';
   });
 
-  // 2. Extrair Tags (#tag) e Contextos GTD (@contexto)
-  const tagAndContextRegex = /(?:^|\s)([#@][\p{L}\p{N}_-]+)\b/gu;
-  workingText = workingText.replace(tagAndContextRegex, (_fullMatch, tagToken: string) => {
-    tagsSet.add(tagToken.toLowerCase());
-    return ' ';
-  });
-
-  // 3. Extrair Lista de destino: ~lista ou ~"Nome da Lista"
+  // 2. Extrair Lista de destino: ~lista ou ~"Nome da Lista"
   const listRegex = /(?:^|\s)~(?:"([^"]+)"|([\p{L}\p{N}_-]+))/gu;
   workingText = workingText.replace(
     listRegex,
@@ -116,6 +114,32 @@ export function parseQuickCaptureInput(
       return ' ';
     }
   );
+
+  // 3. Extrair Lembretes em PT-BR (ex: "lembrar 15 dias antes", "lembrete 15d antes", "lembrar no dia", "lembrete:15d")
+  const onTheDayReminderRegex =
+    /(?:^|\s)\b(?:lembrar|lembrete)\s+no\s+dia(?:\s*[àa]s?\s*(\d{1,2})(?::(\d{2}))?h?)?\b/i;
+  const onTheDayMatch = workingText.match(onTheDayReminderRegex);
+  if (onTheDayMatch) {
+    const rawH = onTheDayMatch[1];
+    const rawM = onTheDayMatch[2];
+    const timeStr = rawH ? `${rawH.padStart(2, '0')}:${(rawM || '00').padStart(2, '0')}` : '09:00';
+    reminders.push(createDefaultReminder(0, timeStr));
+    detectedReminderLabel = `No dia (${timeStr})`;
+    workingText = workingText.replace(onTheDayReminderRegex, ' ');
+  }
+
+  const offsetReminderRegex =
+    /(?:^|\s)\b(?:lembrar|lembrete:?)\s*(\d{1,3})\s*(?:dias?|d)\s*(?:antes)?(?:\s*[àa]s?\s*(\d{1,2})(?::(\d{2}))?h?)?\b/i;
+  const offsetMatch = workingText.match(offsetReminderRegex);
+  if (offsetMatch && offsetMatch[1]) {
+    const days = Math.max(0, Number.parseInt(offsetMatch[1], 10));
+    const rawH = offsetMatch[2];
+    const rawM = offsetMatch[3];
+    const timeStr = rawH ? `${rawH.padStart(2, '0')}:${(rawM || '00').padStart(2, '0')}` : '09:00';
+    reminders.push(createDefaultReminder(days, timeStr));
+    detectedReminderLabel = `${days === 0 ? 'No dia' : `${days}d antes`} (${timeStr})`;
+    workingText = workingText.replace(offsetReminderRegex, ' ');
+  }
 
   // 4. Extrair Modificador de Recorrência por Conclusão: "após concluir" / "após conclusão"
   const afterCompletionRegex = /(?:^|\s)\bap[oó]s\s+(?:concluir|conclus[aã]o)\b/i;
@@ -163,7 +187,7 @@ export function parseQuickCaptureInput(
 
   // 6. Extrair Expressões de Data em Português
   // 6a. "depois de amanhã"
-  const afterTomorrowRegex = /(?:^|\s)\bdepois\s+de\s+amanh[aã]\b/i;
+  const afterTomorrowRegex = /(?:^|\s)depois\s+de\s+amanh[aã](?:[\s.,!?;]|$)/iu;
   if (afterTomorrowRegex.test(workingText)) {
     const target = atNineAM(now, 2);
     dueDate = target.getTime();
@@ -174,7 +198,7 @@ export function parseQuickCaptureInput(
   // 6b. "hoje" / "amanhã" / "próxima semana"
   if (dueDate === null) {
     const relativeWordRegex =
-      /(?:^|\s)\b(hoje|amanh[aã]|pr[oó]xima\s+semana)\b/i;
+      /(?:^|\s)(hoje|amanh[aã]|pr[oó]xima\s+semana)(?:[\s.,!?;]|$)/iu;
     const match = workingText.match(relativeWordRegex);
     if (match && match[1]) {
       const token = match[1].toLowerCase();
@@ -194,7 +218,7 @@ export function parseQuickCaptureInput(
 
   // 6c. Offset curto "+Nd" (ex: +2d, +7d)
   if (dueDate === null) {
-    const offsetDaysRegex = /(?:^|\s)\+(\d{1,3})d\b/i;
+    const offsetDaysRegex = /(?:^|\s)\+(\d{1,3})d(?:[\s.,!?;]|$)/iu;
     const match = workingText.match(offsetDaysRegex);
     if (match && match[1]) {
       const days = Number.parseInt(match[1], 10);
@@ -207,7 +231,7 @@ export function parseQuickCaptureInput(
   // 6d. Dias da semana (segunda, terça, quarta, quinta, sexta, sábado, domingo)
   if (dueDate === null) {
     const weekdayRegex =
-      /(?:^|\s)\b(domingo|segunda(?:-feira)?|ter[cç]a(?:-feira)?|quarta(?:-feira)?|quinta(?:-feira)?|sexta(?:-feira)?|s[aá]bado)\b/i;
+      /(?:^|\s)(domingo|segunda(?:-feira)?|ter[cç]a(?:-feira)?|quarta(?:-feira)?|quinta(?:-feira)?|sexta(?:-feira)?|s[aá]bado)(?:[\s.,!?;]|$)/iu;
     const match = workingText.match(weekdayRegex);
     if (match && match[1]) {
       const dayKey = match[1].toLowerCase();
@@ -256,17 +280,24 @@ export function parseQuickCaptureInput(
     recurrenceMode
   );
 
-  const cleanTitle = workingText.replace(/\s+/g, ' ').trim();
+  // Preserva quebras de linha existentes, normalizando espaços dentro de cada linha
+  const cleanTitle = workingText
+    .split('\n')
+    .map((line) => line.replace(/[^\S\r\n]+/g, ' ').trim())
+    .filter((line, idx, arr) => line.length > 0 || (idx > 0 && idx < arr.length - 1))
+    .join('\n')
+    .trim();
 
   return {
     cleanTitle,
     priority,
-    tags: Array.from(tagsSet),
     targetListQuery,
     dueDate,
     detectedDateLabel,
     recurrenceRule,
     recurrenceMode,
     detectedRecurrenceLabel,
+    reminders: reminders.length > 0 ? reminders : undefined,
+    detectedReminderLabel,
   };
 }

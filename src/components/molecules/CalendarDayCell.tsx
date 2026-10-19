@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlignLeft, Repeat, Sparkles } from 'lucide-react';
+import { AlignLeft, Repeat } from 'lucide-react';
 import type { TaskPriority } from '../../db/schema';
 import { parseRRule } from '../../utils/recurrence';
 import { NativeBridge } from '../../lib/native';
@@ -25,7 +25,6 @@ interface CalendarDayCellProps {
   isSelected: boolean;
   isToday: boolean;
   occurrences: Array<{ task: CalendarTaskItem; isProjected: boolean }>;
-  gridMode: 'month' | 'week';
   onClick: (date: Date) => void;
 }
 
@@ -35,7 +34,6 @@ export const CalendarDayCell: React.FC<CalendarDayCellProps> = ({
   isSelected,
   isToday,
   occurrences,
-  gridMode,
   onClick,
 }) => {
   const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
@@ -48,9 +46,7 @@ export const CalendarDayCell: React.FC<CalendarDayCellProps> = ({
         void NativeBridge.hapticLightImpact();
         onClick(date);
       }}
-      className={`relative flex flex-col items-stretch text-left transition-colors p-1.5 sm:p-2 ${
-        gridMode === 'week' ? 'min-h-28 sm:min-h-36' : 'min-h-16 sm:min-h-24'
-      } ${
+      className={`relative flex flex-col items-stretch text-left transition-colors p-1.5 sm:p-2 min-h-16 sm:min-h-24 ${
         isSelected
           ? 'bg-indigo-600/15 ring-1 ring-inset ring-indigo-500/70'
           : inCurrentMonth
@@ -84,45 +80,37 @@ export const CalendarDayCell: React.FC<CalendarDayCellProps> = ({
       {/* Indicadores Compactos no Mobile (Dots por Prioridade/Evento) */}
       {occurrences.length > 0 && (
         <div className="flex sm:hidden flex-wrap items-center gap-1 mt-auto pb-0.5">
-          {occurrences.slice(0, 4).map(({ task, isProjected }) => {
-            const isYearly = parseRRule(task.recurrenceRule)?.freq === 'YEARLY';
-            return (
-              <span
-                key={`${task.id}-${isProjected ? 'proj' : 'real'}`}
-                className={`w-1.5 h-1.5 rounded-full ${
-                  isYearly ? 'bg-pink-400' : PRIORITY_DOT_CLASS[task.priority]
-                } ${task.status !== 'pending' ? 'opacity-40' : ''}`}
-              />
-            );
-          })}
+          {occurrences.slice(0, 4).map(({ task, isProjected }) => (
+            <span
+              key={`${task.id}-${isProjected ? 'proj' : 'real'}`}
+              className={`w-1.5 h-1.5 rounded-full ${
+                PRIORITY_DOT_CLASS[task.priority]
+              } ${task.status !== 'pending' ? 'opacity-40' : ''}`}
+            />
+          ))}
         </div>
       )}
 
       {/* Mini-Pílulas de Tarefas/Eventos no Desktop */}
       <div className="hidden sm:flex flex-col gap-1 w-full overflow-hidden">
         {occurrences
-          .slice(0, gridMode === 'week' ? 4 : 2)
+          .slice(0, 2)
           .map(({ task, isProjected }) => {
             const parsedRec = parseRRule(task.recurrenceRule);
-            const isYearly = parsedRec?.freq === 'YEARLY';
             const isDone = task.status === 'completed';
 
             return (
               <div
                 key={`${task.id}-${isProjected ? 'proj' : 'real'}`}
                 className={`px-1.5 py-0.5 rounded-md text-[10px] font-medium border truncate flex items-center gap-1 ${
-                  isYearly
-                    ? 'bg-pink-500/15 text-pink-200 border-pink-500/30'
-                    : PRIORITY_PILL_CLASS[task.priority]
+                  PRIORITY_PILL_CLASS[task.priority]
                 } ${isDone ? 'line-through opacity-50' : ''} ${
                   isProjected ? 'border-dashed opacity-85' : ''
                 }`}
               >
-                {isYearly ? (
-                  <Sparkles className="w-2.5 h-2.5 text-pink-400 shrink-0" />
-                ) : parsedRec ? (
+                {parsedRec && (
                   <Repeat className="w-2.5 h-2.5 shrink-0" />
-                ) : null}
+                )}
                 <span className="truncate">{task.title}</span>
                 {task.description.trim().length > 0 && (
                   <AlignLeft className="w-2.5 h-2.5 text-zinc-400 shrink-0" />
@@ -131,9 +119,9 @@ export const CalendarDayCell: React.FC<CalendarDayCellProps> = ({
             );
           })}
 
-        {occurrences.length > (gridMode === 'week' ? 4 : 2) && (
+        {occurrences.length > 2 && (
           <span className="text-[10px] font-semibold text-zinc-400 pl-1">
-            +{occurrences.length - (gridMode === 'week' ? 4 : 2)} mais
+            +{occurrences.length - 2} mais
           </span>
         )}
       </div>

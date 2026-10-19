@@ -1,14 +1,8 @@
 import React, { useMemo } from 'react';
-import {
-  ArrowRightLeft,
-  Pin,
-  Sparkles,
-  Trash2,
-  AlignLeft,
-} from 'lucide-react';
+import { Trash2 } from 'lucide-react';
 import type { TaskStatus } from '../../db/schema';
 import { NativeBridge } from '../../lib/native';
-import { formatRecurrenceBadge, parseRRule } from '../../utils/recurrence';
+import { formatRecurrenceBadge } from '../../utils/recurrence';
 import { PriorityCheckbox } from '../atoms/PriorityCheckbox';
 import { TaskMetaBadges } from './TaskMetaBadges';
 import type { UITask } from '../../types/task';
@@ -20,7 +14,6 @@ export interface TaskRowProps {
   isSelected: boolean;
   onSelect: (task: UITask) => void;
   onToggleStatus: (task: UITask, targetStatus?: TaskStatus) => void;
-  onOpenTriage: (task: UITask) => void;
   onDelete: (task: UITask) => void;
 }
 
@@ -31,7 +24,6 @@ export const TaskRow: React.FC<TaskRowProps> = ({
   isSelected,
   onSelect,
   onToggleStatus,
-  onOpenTriage,
   onDelete,
 }) => {
   const isDone = task.status === 'completed';
@@ -61,11 +53,6 @@ export const TaskRow: React.FC<TaskRowProps> = ({
   const recurrenceLabel = useMemo(
     () => formatRecurrenceBadge(task.recurrenceRule, task.recurrenceMode, true),
     [task.recurrenceRule, task.recurrenceMode]
-  );
-
-  const isYearlyEvent = useMemo(
-    () => parseRRule(task.recurrenceRule)?.freq === 'YEARLY',
-    [task.recurrenceRule]
   );
 
   const hasDescription = useMemo(
@@ -103,15 +90,9 @@ export const TaskRow: React.FC<TaskRowProps> = ({
 
       {/* Conteúdo Central da Tarefa */}
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5">
-          {task.isPinned && (
-            <Pin className="w-3.5 h-3.5 text-indigo-400 shrink-0 rotate-45" />
-          )}
-          {isYearlyEvent && (
-            <Sparkles className="w-3.5 h-3.5 text-pink-400 shrink-0" />
-          )}
+        <div className="flex items-start gap-1.5">
           <span
-            className={`text-sm font-medium truncate ${
+            className={`text-sm font-medium break-words whitespace-pre-wrap flex-1 leading-snug ${
               isDone
                 ? 'line-through text-zinc-500'
                 : 'text-zinc-100'
@@ -119,47 +100,25 @@ export const TaskRow: React.FC<TaskRowProps> = ({
           >
             {task.title}
           </span>
-          {hasDescription && (
-            <span
-              aria-label="Possui anotações"
-              className="shrink-0 text-zinc-400 inline-flex items-center"
-            >
-              <AlignLeft className="w-3.5 h-3.5" />
-            </span>
-          )}
         </div>
 
-        {/* Metadados GTD: Contextos (@tag), Lista, Subtarefas, Recorrência e Data */}
+        {/* Metadados GTD: Lista, Subtarefas, Recorrência e Data */}
         <TaskMetaBadges
           listName={listName}
           recurrenceLabel={recurrenceLabel}
           recurrenceMode={task.recurrenceMode}
-          isYearly={isYearlyEvent}
-          tags={task.tags}
           hasDescription={hasDescription}
           subtasksTotal={subtasks.length}
           subtasksDone={completedSubtasksCount}
           status={task.status}
           formattedDate={formattedDate}
           formattedCompletion={formattedCompletion}
+          reminders={task.reminders}
         />
       </div>
 
-      {/* Ações Rápidas: Triagem GTD e Excluir Tarefa */}
-      <div className="flex items-center gap-0.5 shrink-0">
-        <button
-          type="button"
-          aria-label="Triagem Rápida GTD"
-          onClick={(e) => {
-            e.stopPropagation();
-            void NativeBridge.hapticLightImpact();
-            onOpenTriage(task);
-          }}
-          className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-        >
-          <ArrowRightLeft className="w-4 h-4" />
-        </button>
-
+      {/* Ação Rápida: Excluir Tarefa */}
+      <div className="flex items-center shrink-0 -mt-0.5">
         <button
           type="button"
           aria-label="Excluir tarefa"

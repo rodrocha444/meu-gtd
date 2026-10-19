@@ -1,5 +1,5 @@
 import React from 'react';
-import { Flag, Repeat } from 'lucide-react';
+import { Bell, Flag, Repeat } from 'lucide-react';
 import { getPriorityMeta } from '../../constants/priority';
 import type { ParsedQuickTask } from '../../utils/nlpParser';
 
@@ -10,10 +10,10 @@ interface NLPPreviewPillsProps {
 export const NLPPreviewPills: React.FC<NLPPreviewPillsProps> = ({ parsed }) => {
   const hasPreview =
     parsed.priority > 0 ||
-    parsed.tags.length > 0 ||
     parsed.targetListQuery !== null ||
     parsed.detectedDateLabel !== null ||
-    parsed.detectedRecurrenceLabel !== null;
+    parsed.detectedRecurrenceLabel !== null ||
+    Boolean(parsed.detectedReminderLabel);
 
   if (!hasPreview) return null;
 
@@ -34,14 +34,6 @@ export const NLPPreviewPills: React.FC<NLPPreviewPillsProps> = ({ parsed }) => {
           ~{parsed.targetListQuery}
         </span>
       )}
-      {parsed.tags.map((t) => (
-        <span
-          key={t}
-          className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-medium"
-        >
-          {t}
-        </span>
-      ))}
       {parsed.detectedDateLabel && (
         <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-medium">
           📅 {parsed.detectedDateLabel}
@@ -51,6 +43,12 @@ export const NLPPreviewPills: React.FC<NLPPreviewPillsProps> = ({ parsed }) => {
         <span className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-medium flex items-center gap-1">
           <Repeat className="w-3 h-3" />
           {parsed.detectedRecurrenceLabel}
+        </span>
+      )}
+      {parsed.detectedReminderLabel && (
+        <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-medium flex items-center gap-1">
+          <Bell className="w-3 h-3 text-amber-400" />
+          {parsed.detectedReminderLabel}
         </span>
       )}
     </div>

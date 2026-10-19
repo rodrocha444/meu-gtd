@@ -62,11 +62,13 @@ export const MainHeader: React.FC<MainHeaderProps> = ({
             </h1>
             <p className="text-[11px] text-zinc-400 truncate hidden sm:block">
               {activeView === 'projects'
-                ? 'Revisão Semanal GTD • Garanta que todo projeto ativo tenha uma ação seguinte'
+                ? 'Revisão Semanal GTD • Garanta que todo projeto tenha uma ação seguinte'
                 : activeView === 'completed'
                 ? 'Histórico completo de tarefas concluídas • Toque no checkbox para reativar'
                 : isShowingCalendar
-                ? 'Grade mensal/semanal com eventos, aniversários e repetições'
+                ? 'Grade mensal com eventos, aniversários e repetições'
+                : activeView === 'next_actions'
+                ? 'Ações imediatas e próximos 10 dias • Ações futuras contraídas abaixo'
                 : 'Toque para abrir detalhes • Marque o checkbox para concluir'}
             </p>
           </div>

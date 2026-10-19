@@ -32,23 +32,27 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/75 backdrop-blur-xs p-0 md:p-4"
+      className="absolute inset-0 z-50 flex items-end md:items-center justify-center bg-black/75 backdrop-blur-xs p-0 md:p-4"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-sm bg-zinc-900 border-t md:border border-zinc-800 rounded-t-3xl md:rounded-2xl p-5 space-y-4 shadow-2xl"
+        style={{
+          paddingBottom:
+            'max(1.25rem, calc(var(--safe-bottom, 0px) - var(--keyboard-height, 0px)))',
+        }}
+        className="w-full max-w-sm max-h-full overflow-y-auto native-scroll-container bg-zinc-900 border-t md:border border-zinc-800 rounded-t-3xl md:rounded-2xl p-5 md:pb-5 space-y-4 shadow-2xl"
       >
         <SheetHandle />
 
-        <div className="flex items-center gap-3">
-          <div className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${iconBgClass}`}>
+        <div className="flex items-start gap-3">
+          <div className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 mt-0.5 ${iconBgClass}`}>
             {icon}
           </div>
           <div className="min-w-0 flex-1">
             <h3 className="text-sm font-bold text-zinc-100">{title}</h3>
             {subtitle && (
-              <p className="text-xs text-zinc-400 mt-0.5 truncate">&ldquo;{subtitle}&rdquo;</p>
+              <p className="text-xs text-zinc-400 mt-0.5 line-clamp-3 break-words whitespace-pre-wrap">&ldquo;{subtitle}&rdquo;</p>
             )}
           </div>
         </div>

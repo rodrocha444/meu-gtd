@@ -1,45 +1,38 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlignLeft,
+  Bell,
   Check,
-  CheckCircle2,
   CheckSquare,
-  ChevronRight,
   Edit3,
   Eye,
   List,
   ListOrdered,
   Maximize2,
   Minimize2,
-  Pin,
   RefreshCw,
-  Save,
-  Tag,
   Trash2,
   X,
 } from 'lucide-react';
 import type { RecurrenceMode, TaskPriority, TaskStatus } from '../../db/schema';
 import { NativeBridge } from '../../lib/native';
-import {
-  getPriorityMeta,
-  GTD_CONTEXT_SUGGESTIONS,
-} from '../../constants/priority';
+import { getPriorityMeta } from '../../constants/priority';
 import { SheetHandle } from '../atoms/SheetHandle';
-import { SubtaskItem } from '../molecules/SubtaskItem';
 import {
   CustomDatePicker,
   CustomRecurrencePicker,
+  CustomReminderPicker,
   CustomSelect,
   type CustomSelectOption,
 } from '../ui/CustomControls';
-import type { UIList, UITask } from '../../types/task';
+import type { UIList, UITask, TaskReminder } from '../../types/task';
 
 interface TaskDetailSheetProps {
   selectedTask: UITask | null;
   onClose: () => void;
   listMap: Record<string, UIList>;
   listSelectOptions: CustomSelectOption<string>[];
-  subtasks: UITask[];
+  subtasks?: UITask[];
   onUpdateTask: (
     taskId: string,
     updates: Partial<
@@ -49,18 +42,17 @@ interface TaskDetailSheetProps {
         | 'description'
         | 'listId'
         | 'priority'
-        | 'tags'
         | 'dueDate'
         | 'recurrenceRule'
         | 'recurrenceMode'
-        | 'isPinned'
+        | 'reminders'
       >
     >
   ) => Promise<void> | void;
   onToggleStatus: (task: UITask, targetStatus?: TaskStatus) => void;
   onDeleteTask: (task: UITask) => void;
-  onAddSubtask: (parentTask: UITask, title: string) => void;
-  onDeleteSubtask: (subtaskId: string) => void;
+  onAddSubtask?: (parentTask: UITask, title: string) => void;
+  onDeleteSubtask?: (subtaskId: string) => void;
 }
 
 export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
@@ -68,16 +60,10 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
   onClose,
   listMap,
   listSelectOptions,
-  subtasks,
   onUpdateTask,
   onToggleStatus,
   onDeleteTask,
-  onAddSubtask,
-  onDeleteSubtask,
 }) => {
-  const [subtaskInput, setSubtaskInput] = useState('');
-  const [customTagInput, setCustomTagInput] = useState('');
-
   // Rascunho local de edição da tarefa
   const [draftTitle, setDraftTitle] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
@@ -86,7 +72,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
   const [draftRecurrenceRule, setDraftRecurrenceRule] = useState<string | null>(null);
   const [draftRecurrenceMode, setDraftRecurrenceMode] = useState<RecurrenceMode>('fixed');
   const [draftPriority, setDraftPriority] = useState<TaskPriority>(0);
-  const [draftTags, setDraftTags] = useState<string[]>([]);
+  const [draftReminders, setDraftReminders] = useState<TaskReminder[]>([]);
 
   // Estados de expansão e visualização da descrição
   const [isExpandedModalOpen, setIsExpandedModalOpen] = useState(false);
@@ -94,145 +80,214 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const expandedTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const titleTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Estados de persistência no banco de dados
+  // Auto-dimensionamento da altura do título em múltiplas linhas
+  useEffect(() => {
+    if (titleTextareaRef.current) {
+      titleTextareaRef.current.style.height = 'auto';
+      titleTextareaRef.current.style.height = `${titleTextareaRef.current.scrollHeight}px`;
+    }
+  }, [draftTitle]);
+
+  // Status de auto-save offline-first
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
+
+  // Refs para manter sempre a versão mais recente em memória para auto-save
+  const draftTitleRef = useRef(draftTitle);
+  const draftDescriptionRef = useRef(draftDescription);
+  const draftListIdRef = useRef(draftListId);
+  const draftDueDateRef = useRef(draftDueDate);
+  const draftRecurrenceRuleRef = useRef(draftRecurrenceRule);
+  const draftRecurrenceModeRef = useRef(draftRecurrenceMode);
+  const draftPriorityRef = useRef(draftPriority);
+  const draftRemindersRef = useRef(draftReminders);
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => { draftTitleRef.current = draftTitle; }, [draftTitle]);
+  useEffect(() => { draftDescriptionRef.current = draftDescription; }, [draftDescription]);
+  useEffect(() => { draftListIdRef.current = draftListId; }, [draftListId]);
+  useEffect(() => { draftDueDateRef.current = draftDueDate; }, [draftDueDate]);
+  useEffect(() => { draftRecurrenceRuleRef.current = draftRecurrenceRule; }, [draftRecurrenceRule]);
+  useEffect(() => { draftRecurrenceModeRef.current = draftRecurrenceMode; }, [draftRecurrenceMode]);
+  useEffect(() => { draftPriorityRef.current = draftPriority; }, [draftPriority]);
+  useEffect(() => { draftRemindersRef.current = draftReminders; }, [draftReminders]);
+
+  // Executa o salvamento imediato das alterações no banco / estado local
+  const flushSave = async (
+    overrides?: Partial<{
+      title: string;
+      description: string;
+      listId: string;
+      dueDate: number | null;
+      recurrenceRule: string | null;
+      recurrenceMode: RecurrenceMode;
+      priority: TaskPriority;
+      reminders: TaskReminder[];
+    }>
+  ) => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    if (!selectedTask) return;
+
+    const newTitle =
+      overrides?.title !== undefined
+        ? overrides.title
+        : draftTitleRef.current.trim() || selectedTask.title;
+    const newDescription =
+      overrides?.description !== undefined
+        ? overrides.description
+        : draftDescriptionRef.current;
+    const newListId =
+      overrides?.listId !== undefined
+        ? overrides.listId
+        : draftListIdRef.current;
+    const newDueDate =
+      overrides?.dueDate !== undefined
+        ? overrides.dueDate
+        : draftDueDateRef.current;
+    const newRecurrenceRule =
+      overrides?.recurrenceRule !== undefined
+        ? overrides.recurrenceRule
+        : draftRecurrenceRuleRef.current;
+    const newRecurrenceMode =
+      overrides?.recurrenceMode !== undefined
+        ? overrides.recurrenceMode
+        : draftRecurrenceModeRef.current;
+    const newPriority =
+      overrides?.priority !== undefined
+        ? overrides.priority
+        : draftPriorityRef.current;
+    const newReminders =
+      overrides?.reminders !== undefined
+        ? overrides.reminders
+        : draftRemindersRef.current;
+
+    const updates = {
+      title: newTitle,
+      description: newDescription,
+      listId: newListId,
+      dueDate: newDueDate,
+      recurrenceRule: newRecurrenceRule,
+      recurrenceMode: newRecurrenceMode,
+      priority: newPriority,
+      reminders: newReminders,
+    };
+
+    const hasAnyChange =
+      updates.title !== selectedTask.title ||
+      updates.description !== selectedTask.description ||
+      updates.listId !== selectedTask.listId ||
+      updates.dueDate !== selectedTask.dueDate ||
+      updates.recurrenceRule !== selectedTask.recurrenceRule ||
+      updates.recurrenceMode !== selectedTask.recurrenceMode ||
+      updates.priority !== selectedTask.priority ||
+      JSON.stringify(updates.reminders ?? []) !==
+        JSON.stringify(selectedTask.reminders ?? []);
+
+    if (!hasAnyChange) return;
+
+    try {
+      setSaveStatus('saving');
+      await onUpdateTask(selectedTask.id, updates);
+      setSaveStatus('saved');
+      setTimeout(() => {
+        setSaveStatus((curr) => (curr === 'saved' ? 'idle' : curr));
+      }, 2000);
+    } catch {
+      setSaveStatus('error');
+    }
+  };
+
+  // Agenda salvamento com debounce de 400ms para digitação contínua
+  const scheduleDebouncedSave = () => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    setSaveStatus('saving');
+    debounceTimerRef.current = setTimeout(() => {
+      void flushSave();
+    }, 400);
+  };
+
+  // Salva imediatamente um campo modificado (dropdowns, datas, prioridade, etc.)
+  const saveImmediate = (overrides: Partial<Parameters<typeof flushSave>[0]>) => {
+    void flushSave(overrides);
+  };
 
   // Inicializa o rascunho quando a tarefa selecionada muda
+  const prevTaskIdRef = useRef(selectedTask?.id);
   useEffect(() => {
+    if (prevTaskIdRef.current && prevTaskIdRef.current !== selectedTask?.id) {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+        void flushSave();
+      }
+    }
+    prevTaskIdRef.current = selectedTask?.id;
+
     if (selectedTask) {
       setDraftTitle(selectedTask.title);
+      draftTitleRef.current = selectedTask.title;
       setDraftDescription(selectedTask.description);
+      draftDescriptionRef.current = selectedTask.description;
       setDraftListId(selectedTask.listId);
+      draftListIdRef.current = selectedTask.listId;
       setDraftDueDate(selectedTask.dueDate);
+      draftDueDateRef.current = selectedTask.dueDate;
       setDraftRecurrenceRule(selectedTask.recurrenceRule);
+      draftRecurrenceRuleRef.current = selectedTask.recurrenceRule;
       setDraftRecurrenceMode(selectedTask.recurrenceMode);
+      draftRecurrenceModeRef.current = selectedTask.recurrenceMode;
       setDraftPriority(selectedTask.priority);
-      setDraftTags([...selectedTask.tags]);
+      draftPriorityRef.current = selectedTask.priority;
+      setDraftReminders(selectedTask.reminders ?? []);
+      draftRemindersRef.current = selectedTask.reminders ?? [];
       setSaveStatus('idle');
       setIsPreviewMode(false);
       setIsExpandedModalOpen(false);
     }
   }, [selectedTask?.id]);
 
-  // Detector de alterações pendentes em relação ao objeto salvo no banco
-  const hasPendingChanges = useMemo(() => {
-    if (!selectedTask) return false;
-    if (draftTitle !== selectedTask.title) return true;
-    if (draftDescription !== selectedTask.description) return true;
-    if (draftListId !== selectedTask.listId) return true;
-    if (draftDueDate !== selectedTask.dueDate) return true;
-    if (draftRecurrenceRule !== selectedTask.recurrenceRule) return true;
-    if (draftRecurrenceMode !== selectedTask.recurrenceMode) return true;
-    if (draftPriority !== selectedTask.priority) return true;
-    if (draftTags.length !== selectedTask.tags.length) return true;
-    const s = new Set(draftTags);
-    for (const tag of selectedTask.tags) {
-      if (!s.has(tag)) return true;
-    }
-    return false;
-  }, [
-    selectedTask,
-    draftTitle,
-    draftDescription,
-    draftListId,
-    draftDueDate,
-    draftRecurrenceRule,
-    draftRecurrenceMode,
-    draftPriority,
-    draftTags,
-  ]);
-
-  // Salvar explicitamente no banco de dados com feedback visual completo
-  const handleSave = async () => {
-    if (!selectedTask) return;
-    const cleanTitle = draftTitle.trim();
-    if (!cleanTitle) {
-      setDraftTitle(selectedTask.title);
-      return;
-    }
-
-    try {
-      setSaveStatus('saving');
-      void NativeBridge.hapticLightImpact();
-
-      const updates = {
-        title: cleanTitle,
-        description: draftDescription,
-        listId: draftListId,
-        dueDate: draftDueDate,
-        recurrenceRule: draftRecurrenceRule,
-        recurrenceMode: draftRecurrenceMode,
-        priority: draftPriority,
-        tags: draftTags,
-      };
-
-      await onUpdateTask(selectedTask.id, updates);
-
-      if (cleanTitle !== draftTitle) {
-        setDraftTitle(cleanTitle);
+  // Garante salvar alterações pendentes ao fechar ou desmontar
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        void flushSave();
       }
+    };
+  }, []);
 
-      const now = new Date();
-      const timeStr = now.toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
-      setLastSavedTime(timeStr);
-      setSaveStatus('saved');
-      void NativeBridge.hapticSwipeAction();
-
-      setTimeout(() => {
-        setSaveStatus((curr) => (curr === 'saved' ? 'idle' : curr));
-      }, 4000);
-    } catch {
-      setSaveStatus('error');
-    }
-  };
-
-  // Fecha o painel sem salvar (descarta alterações não salvas se o botão Salvar não foi clicado)
+  // Fecha o painel garantindo que tudo foi salvo
   const handleClose = () => {
+    void flushSave();
     onClose();
   };
 
-  // Atalho de teclado Ctrl+S / Cmd+S para salvar a tarefa
+  // Atalho de teclado Ctrl+S / Cmd+S para forçar flush imediato
   useEffect(() => {
     if (!selectedTask) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
-        void handleSave();
+        void flushSave();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [
-    selectedTask?.id,
-    draftTitle,
-    draftDescription,
-    draftListId,
-    draftDueDate,
-    draftRecurrenceRule,
-    draftRecurrenceMode,
-    draftPriority,
-    draftTags,
-  ]);
+  }, [selectedTask?.id]);
 
   if (!selectedTask) return null;
 
   const handlePriorityChange = (priority: TaskPriority) => {
     void NativeBridge.hapticLightImpact();
     setDraftPriority(priority);
-  };
-
-  const handlePinToggle = () => {
-    void NativeBridge.hapticLightImpact();
-    const nextPinned = !selectedTask.isPinned;
-    void onUpdateTask(selectedTask.id, {
-      isPinned: nextPinned,
-    });
+    draftPriorityRef.current = priority;
+    saveImmediate({ priority });
   };
 
   const handleToggleTaskStatus = () => {
@@ -240,24 +295,6 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
       selectedTask,
       selectedTask.status === 'completed' ? 'pending' : 'completed'
     );
-  };
-
-  const handleAddStep = () => {
-    const clean = subtaskInput.trim();
-    if (!clean) return;
-    onAddSubtask(selectedTask, clean);
-    setSubtaskInput('');
-  };
-
-  const handleAddCustomTag = () => {
-    const raw = customTagInput.trim().toLowerCase();
-    if (!raw) return;
-    const formatted = raw.startsWith('@') || raw.startsWith('#') ? raw : `#${raw}`;
-    if (!draftTags.includes(formatted)) {
-      void NativeBridge.hapticLightImpact();
-      setDraftTags((prev) => [...prev, formatted]);
-    }
-    setCustomTagInput('');
   };
 
   // Inserção inteligente de listas dentro da descrição
@@ -288,6 +325,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
       const newValue =
         value.slice(0, selectionStart) + replacement + value.slice(selectionEnd);
       setDraftDescription(newValue);
+      draftDescriptionRef.current = newValue;
+      saveImmediate({ description: newValue });
       setTimeout(() => {
         textarea.focus();
         textarea.selectionStart = selectionStart;
@@ -303,6 +342,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
         const newValue =
           value.slice(0, lineStart) + prefix + value.slice(selectionStart);
         setDraftDescription(newValue);
+        draftDescriptionRef.current = newValue;
+        saveImmediate({ description: newValue });
         setTimeout(() => {
           textarea.focus();
           textarea.selectionStart = textarea.selectionEnd =
@@ -313,8 +354,10 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
         const newValue =
           value.slice(0, selectionStart) +
           insertStr +
-          value.slice(selectionStart);
+          value.slice(selectionEnd);
         setDraftDescription(newValue);
+        draftDescriptionRef.current = newValue;
+        saveImmediate({ description: newValue });
         setTimeout(() => {
           textarea.focus();
           textarea.selectionStart = textarea.selectionEnd =
@@ -351,6 +394,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             const newValue =
               value.slice(0, lineStart) + value.slice(selectionStart);
             setDraftDescription(newValue);
+            draftDescriptionRef.current = newValue;
+            scheduleDebouncedSave();
             setTimeout(() => {
               textarea.selectionStart = textarea.selectionEnd = lineStart;
             }, 0);
@@ -365,6 +410,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             newPrefix +
             value.slice(selectionStart);
           setDraftDescription(newValue);
+          draftDescriptionRef.current = newValue;
+          scheduleDebouncedSave();
           setTimeout(() => {
             textarea.selectionStart = textarea.selectionEnd =
               selectionStart + newPrefix.length;
@@ -383,6 +430,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             const newValue =
               value.slice(0, lineStart) + value.slice(selectionStart);
             setDraftDescription(newValue);
+            draftDescriptionRef.current = newValue;
+            scheduleDebouncedSave();
             setTimeout(() => {
               textarea.selectionStart = textarea.selectionEnd = lineStart;
             }, 0);
@@ -398,6 +447,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             newPrefix +
             value.slice(selectionStart);
           setDraftDescription(newValue);
+          draftDescriptionRef.current = newValue;
+          scheduleDebouncedSave();
           setTimeout(() => {
             textarea.selectionStart = textarea.selectionEnd =
               selectionStart + newPrefix.length;
@@ -417,6 +468,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             const newValue =
               value.slice(0, lineStart) + value.slice(selectionStart);
             setDraftDescription(newValue);
+            draftDescriptionRef.current = newValue;
+            scheduleDebouncedSave();
             setTimeout(() => {
               textarea.selectionStart = textarea.selectionEnd = lineStart;
             }, 0);
@@ -429,6 +482,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             newPrefix +
             value.slice(selectionStart);
           setDraftDescription(newValue);
+          draftDescriptionRef.current = newValue;
+          scheduleDebouncedSave();
           setTimeout(() => {
             textarea.selectionStart = textarea.selectionEnd =
               selectionStart + newPrefix.length;
@@ -447,6 +502,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
       const newValue =
         value.slice(0, selectionStart) + insertText + value.slice(selectionEnd);
       setDraftDescription(newValue);
+      draftDescriptionRef.current = newValue;
+      scheduleDebouncedSave();
       setTimeout(() => {
         textarea.selectionStart = textarea.selectionEnd =
           selectionStart + insertText.length;
@@ -465,7 +522,10 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
         /^(\s*[-*]\s*\[)[ xX](\]\s*)/,
         `$1${newChecked ? 'x' : ' '}$2`
       );
-      setDraftDescription(lines.join('\n'));
+      const newDesc = lines.join('\n');
+      setDraftDescription(newDesc);
+      draftDescriptionRef.current = newDesc;
+      saveImmediate({ description: newDesc });
     }
   };
 
@@ -562,12 +622,12 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
   return (
     <>
       <div
-        className="fixed inset-0 z-40 md:static md:inset-auto md:z-auto flex items-end md:items-stretch bg-black/60 md:bg-transparent backdrop-blur-xs md:backdrop-blur-none"
+        className="absolute inset-0 z-40 md:static md:inset-auto md:z-auto flex items-end md:items-stretch bg-black/60 md:bg-transparent backdrop-blur-xs md:backdrop-blur-none pt-[calc(var(--safe-top,0px)+0.75rem)] md:pt-0"
         onClick={handleClose}
       >
         <div
           onClick={(e) => e.stopPropagation()}
-          className="w-full md:w-[410px] max-h-[88dvh] md:max-h-none bg-zinc-900 md:border-l border-t md:border-t-0 border-zinc-800 rounded-t-3xl md:rounded-none flex flex-col overflow-hidden shadow-2xl"
+          className="w-full md:w-[410px] max-h-[calc(100%-var(--safe-top,0px)-0.75rem)] md:max-h-none bg-zinc-900 md:border-l border-t md:border-t-0 border-zinc-800 rounded-t-3xl md:rounded-none flex flex-col overflow-hidden shadow-2xl"
         >
           <SheetHandle />
 
@@ -577,56 +637,21 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
               <span className="text-xs font-semibold text-zinc-400">
                 {listMap[draftListId]?.name ?? 'Inbox'}
               </span>
-              <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />
-              <span className="text-xs text-zinc-500">Detalhes GTD</span>
+              {saveStatus === 'saving' && (
+                <span className="flex items-center gap-1 text-[11px] text-zinc-400">
+                  <RefreshCw className="w-2.5 h-2.5 animate-spin text-indigo-400" />
+                  <span className="hidden sm:inline">Salvando...</span>
+                </span>
+              )}
+              {saveStatus === 'saved' && (
+                <span className="flex items-center gap-1 text-[11px] text-emerald-400/80">
+                  <Check className="w-2.5 h-2.5 text-emerald-400" />
+                  <span className="hidden sm:inline">Salvo</span>
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-1.5">
-              {/* Botão Salvar no Header */}
-              <button
-                type="button"
-                aria-label="Salvar alterações"
-                disabled={saveStatus === 'saving'}
-                onClick={() => void handleSave()}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 border transition-all ${
-                  hasPendingChanges
-                    ? 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-500 shadow-sm shadow-indigo-500/30 ring-1 ring-indigo-400/50'
-                    : saveStatus === 'saved'
-                    ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-600/30'
-                    : 'bg-zinc-800/70 text-zinc-300 border-zinc-700/60 hover:text-white hover:bg-zinc-800'
-                }`}
-                title="Salvar alterações no banco de dados (Ctrl+S)"
-              >
-                {saveStatus === 'saving' ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-200" />
-                ) : saveStatus === 'saved' ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                ) : (
-                  <Save className="w-3.5 h-3.5" />
-                )}
-                <span>
-                  {saveStatus === 'saving'
-                    ? 'Salvando'
-                    : saveStatus === 'saved'
-                    ? 'Salvo'
-                    : 'Salvar'}
-                </span>
-              </button>
-
-              {/* Botão Fixar no Topo (Pin) */}
-              <button
-                type="button"
-                aria-label="Fixar tarefa"
-                onClick={handlePinToggle}
-                className={`p-1.5 rounded-lg border transition-colors ${
-                  selectedTask.isPinned
-                    ? 'bg-indigo-600/20 text-indigo-300 border-indigo-500/40'
-                    : 'bg-zinc-800/70 text-zinc-400 border-zinc-700/60 hover:text-zinc-200'
-                }`}
-              >
-                <Pin className="w-3.5 h-3.5" />
-              </button>
-
               {/* Botão Concluir Tarefa */}
               <button
                 type="button"
@@ -666,20 +691,28 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
           </div>
 
           {/* Corpo do Detalhe com Scroll Nativo */}
-          <div className="flex-1 native-scroll-container p-4 space-y-4">
+          <div className="flex-1 native-scroll-container p-4 space-y-4 pb-[max(2rem,calc(var(--safe-bottom,0px)+1.5rem))]">
             {/* Título Editável + Notas */}
             <div>
-              <input
-                type="text"
+              <textarea
+                ref={titleTextareaRef}
+                rows={1}
                 value={draftTitle}
-                onChange={(e) => setDraftTitle(e.target.value)}
+                onChange={(e) => {
+                  setDraftTitle(e.target.value);
+                  draftTitleRef.current = e.target.value;
+                  scheduleDebouncedSave();
+                }}
+                onBlur={() => void flushSave()}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
+                  if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
-                    void handleSave();
+                    void flushSave();
+                    (e.target as HTMLElement).blur();
                   }
                 }}
-                className="w-full bg-transparent text-base font-semibold text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 rounded-lg px-1.5 py-1 -mx-1.5"
+                placeholder="Título da tarefa..."
+                className="w-full bg-transparent text-base font-semibold text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 rounded-lg px-1.5 py-1 -mx-1.5 resize-none break-words whitespace-pre-wrap overflow-hidden leading-snug"
               />
               <div className="mt-2.5">
                 <div className="flex items-center justify-between mb-1.5">
@@ -792,7 +825,12 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
                     ref={textareaRef}
                     rows={isInlineExpanded ? 10 : 4}
                     value={draftDescription}
-                    onChange={(e) => setDraftDescription(e.target.value)}
+                    onChange={(e) => {
+                      setDraftDescription(e.target.value);
+                      draftDescriptionRef.current = e.target.value;
+                      scheduleDebouncedSave();
+                    }}
+                    onBlur={() => void flushSave()}
                     onKeyDown={handleDescriptionKeyDown}
                     placeholder="Notas em Markdown, listas (- item, 1. item) ou checklist (- [ ] item)..."
                     className="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl p-2.5 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 font-mono leading-relaxed transition-all resize-y"
@@ -809,7 +847,11 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
               <CustomSelect<string>
                 value={draftListId}
                 options={listSelectOptions}
-                onChange={(nextListId) => setDraftListId(nextListId)}
+                onChange={(nextListId) => {
+                  setDraftListId(nextListId);
+                  draftListIdRef.current = nextListId;
+                  saveImmediate({ listId: nextListId });
+                }}
               />
             </div>
 
@@ -820,7 +862,11 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
               </label>
               <CustomDatePicker
                 value={draftDueDate}
-                onChange={(nextDueDate) => setDraftDueDate(nextDueDate)}
+                onChange={(nextDueDate) => {
+                  setDraftDueDate(nextDueDate);
+                  draftDueDateRef.current = nextDueDate;
+                  saveImmediate({ dueDate: nextDueDate });
+                }}
               />
             </div>
 
@@ -834,10 +880,50 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
                 recurrenceMode={draftRecurrenceMode}
                 onChange={({ recurrenceRule, recurrenceMode }) => {
                   setDraftRecurrenceRule(recurrenceRule);
+                  draftRecurrenceRuleRef.current = recurrenceRule;
                   setDraftRecurrenceMode(recurrenceMode);
+                  draftRecurrenceModeRef.current = recurrenceMode;
+                  let newDue = draftDueDate;
                   if (recurrenceRule && draftDueDate === null) {
-                    setDraftDueDate(Date.now());
+                    newDue = Date.now();
+                    setDraftDueDate(newDue);
+                    draftDueDateRef.current = newDue;
                   }
+                  saveImmediate({
+                    recurrenceRule,
+                    recurrenceMode,
+                    dueDate: newDue,
+                  });
+                }}
+              />
+            </div>
+
+            {/* Lembretes com Antecedência usando CustomReminderPicker */}
+            <div>
+              <label className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5 flex items-center gap-1.5">
+                <Bell className="w-3.5 h-3.5 text-amber-400" />
+                Lembretes & Notificações
+              </label>
+              <CustomReminderPicker
+                dueDate={draftDueDate}
+                reminders={draftReminders}
+                onChange={(nextReminders) => {
+                  setDraftReminders(nextReminders);
+                  draftRemindersRef.current = nextReminders;
+                  if (draftDueDateRef.current === null) {
+                    const now = Date.now();
+                    setDraftDueDate(now);
+                    draftDueDateRef.current = now;
+                    saveImmediate({ dueDate: now, reminders: nextReminders });
+                  } else {
+                    saveImmediate({ reminders: nextReminders });
+                  }
+                }}
+                onSetDueDateDefault={() => {
+                  const now = Date.now();
+                  setDraftDueDate(now);
+                  draftDueDateRef.current = now;
+                  saveImmediate({ dueDate: now });
                 }}
               />
             </div>
@@ -869,130 +955,6 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
               </div>
             </div>
 
-            {/* Contextos GTD & Tags */}
-            <div>
-              <label className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-                Contextos GTD & Tags
-              </label>
-
-              {/* Chips de tags ativas vinculadas com botão de remoção */}
-              {draftTags.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mb-2.5 p-2 rounded-xl bg-zinc-950/50 border border-zinc-800/70">
-                  {draftTags.map((tag) => (
-                    <span
-                      key={tag}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-zinc-800 text-zinc-200 border border-zinc-700/60 shadow-xs"
-                    >
-                      <Tag className="w-3 h-3 text-indigo-400 shrink-0" />
-                      <span>{tag}</span>
-                      <button
-                        type="button"
-                        aria-label={`Remover tag ${tag}`}
-                        onClick={() => {
-                          void NativeBridge.hapticLightImpact();
-                          setDraftTags((prev) => prev.filter((t) => t !== tag));
-                        }}
-                        className="hover:text-red-400 text-zinc-400 ml-0.5 transition-colors p-0.5 rounded"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {GTD_CONTEXT_SUGGESTIONS.map((ctx) => {
-                  const active = draftTags.includes(ctx);
-                  return (
-                    <button
-                      key={ctx}
-                      type="button"
-                      onClick={() => {
-                        void NativeBridge.hapticLightImpact();
-                        const nextTags = active
-                          ? draftTags.filter((t) => t !== ctx)
-                          : [...draftTags, ctx];
-                        setDraftTags(nextTags);
-                      }}
-                      className={`px-2 py-1 rounded-lg text-xs font-medium border flex items-center gap-1 transition-colors ${
-                        active
-                          ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
-                          : 'bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                      }`}
-                    >
-                      <Tag className="w-3 h-3" />
-                      <span>{ctx}</span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Adicionar Tag Customizada */}
-              <div className="flex gap-1.5">
-                <input
-                  type="text"
-                  value={customTagInput}
-                  onChange={(e) => setCustomTagInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      handleAddCustomTag();
-                    }
-                  }}
-                  placeholder="Nova tag (@contexto ou #tag)..."
-                  className="flex-1 bg-zinc-950/70 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
-                />
-                <button
-                  type="button"
-                  onClick={handleAddCustomTag}
-                  className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium"
-                >
-                  + Tag
-                </button>
-              </div>
-            </div>
-
-            {/* Subtarefas / Checklists (parent_task_id) */}
-            <div>
-              <label className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-                Subtarefas / Checklist
-              </label>
-              <div className="space-y-1.5 mb-2">
-                {subtasks.map((sub) => (
-                  <SubtaskItem
-                    key={sub.id}
-                    subtask={sub}
-                    onToggle={(s) => onToggleStatus(s)}
-                    onDelete={onDeleteSubtask}
-                  />
-                ))}
-              </div>
-
-            <div className="flex gap-1.5">
-              <input
-                type="text"
-                value={subtaskInput}
-                onChange={(e) => setSubtaskInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleAddStep();
-                  }
-                }}
-                placeholder="Adicionar passo da subtarefa..."
-                className="flex-1 bg-zinc-950/70 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
-              />
-              <button
-                type="button"
-                onClick={handleAddStep}
-                className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium"
-              >
-                + Passo
-              </button>
-            </div>
-          </div>
-
           {/* Botão Excluir Tarefa Principal */}
           <div className="pt-3 border-t border-zinc-800/80">
             <button
@@ -1008,67 +970,6 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             </button>
           </div>
         </div>
-
-        {/* Rodapé Fixo com Status de Persistência no Banco e Botão Salvar Principal */}
-        <div className="p-3.5 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-md flex items-center justify-between gap-3 shrink-0">
-          <div className="flex items-center gap-2 min-w-0">
-            {saveStatus === 'saving' ? (
-              <div className="flex items-center gap-1.5 text-xs text-amber-400">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400 shrink-0" />
-                <span className="font-medium truncate">Salvando no banco de dados...</span>
-              </div>
-            ) : saveStatus === 'saved' ? (
-              <div className="flex items-center gap-1.5 text-xs text-emerald-400">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                <span className="font-medium truncate">
-                  Salvo no banco{lastSavedTime ? ` às ${lastSavedTime}` : ''}
-                </span>
-              </div>
-            ) : hasPendingChanges ? (
-              <div className="flex items-center gap-1.5 text-xs text-amber-400">
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
-                <span className="font-medium truncate">Alterações não salvas</span>
-              </div>
-            ) : (
-              <div className="flex items-center gap-1.5 text-xs text-zinc-500">
-                <Check className="w-3.5 h-3.5 text-emerald-500/70 shrink-0" />
-                <span className="truncate">
-                  {lastSavedTime ? `Salvo no banco às ${lastSavedTime}` : 'Sincronizado com o banco'}
-                </span>
-              </div>
-            )}
-          </div>
-
-          <button
-            type="button"
-            disabled={saveStatus === 'saving'}
-            onClick={() => void handleSave()}
-            className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all active:scale-95 shrink-0 shadow-sm ${
-              hasPendingChanges
-                ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/30 ring-1 ring-indigo-400/50'
-                : saveStatus === 'saved'
-                ? 'bg-emerald-600/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/30'
-                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700/60'
-            }`}
-          >
-            {saveStatus === 'saving' ? (
-              <>
-                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                <span>Salvando...</span>
-              </>
-            ) : saveStatus === 'saved' ? (
-              <>
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Salvo no Banco!</span>
-              </>
-            ) : (
-              <>
-                <Save className="w-3.5 h-3.5" />
-                <span>{hasPendingChanges ? 'Salvar Alterações' : 'Salvar'}</span>
-              </>
-            )}
-          </button>
-        </div>
       </div>
     </div>
 
@@ -1077,12 +978,12 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
         ========================================================================= */}
     {isExpandedModalOpen && (
       <div
-        className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/80 backdrop-blur-sm"
+        className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/80 backdrop-blur-sm pt-[calc(var(--safe-top,0px)+0.75rem)] pb-[calc(var(--safe-bottom,0px)+0.75rem)]"
         onClick={() => setIsExpandedModalOpen(false)}
       >
         <div
           onClick={(e) => e.stopPropagation()}
-          className="w-full max-w-3xl h-[85vh] bg-zinc-900 border border-zinc-800 rounded-2xl flex flex-col overflow-hidden shadow-2xl"
+          className="w-full max-w-3xl h-[85vh] max-h-[calc(100%-var(--safe-top,0px)-1.5rem)] bg-zinc-900 border border-zinc-800 rounded-2xl flex flex-col overflow-hidden shadow-2xl"
         >
           {/* Header do Editor Expandido */}
           <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-800 bg-zinc-950/60">
@@ -1168,7 +1069,12 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
               <textarea
                 ref={expandedTextareaRef}
                 value={draftDescription}
-                onChange={(e) => setDraftDescription(e.target.value)}
+                onChange={(e) => {
+                  setDraftDescription(e.target.value);
+                  draftDescriptionRef.current = e.target.value;
+                  scheduleDebouncedSave();
+                }}
+                onBlur={() => void flushSave()}
                 onKeyDown={handleDescriptionKeyDown}
                 placeholder="Digite notas em Markdown, tarefas com checklist (- [ ]), links e listas..."
                 className="w-full h-full min-h-[300px] bg-transparent text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none resize-none font-mono leading-relaxed"
@@ -1184,22 +1090,14 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             <div className="flex items-center gap-2.5 ml-auto">
               <button
                 type="button"
-                onClick={() => setIsExpandedModalOpen(false)}
-                className="px-3.5 py-1.5 rounded-xl border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-300 transition-colors"
-              >
-                Concluir
-              </button>
-
-              <button
-                type="button"
                 onClick={() => {
-                  void handleSave();
+                  void flushSave();
                   setIsExpandedModalOpen(false);
                 }}
                 className="px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white shadow-sm flex items-center gap-1.5 transition-colors"
               >
-                <Save className="w-3.5 h-3.5" />
-                <span>Salvar e Fechar</span>
+                <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                <span>Concluir</span>
               </button>
             </div>
           </div>

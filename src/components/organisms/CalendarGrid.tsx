@@ -9,7 +9,6 @@ interface CalendarGridProps {
   occurrencesByDateKey: Map<string, Array<{ task: CalendarTaskItem; isProjected: boolean }>>;
   selectedDay: Date;
   today: Date;
-  gridMode: 'month' | 'week';
   onSelectDay: (date: Date) => void;
 }
 
@@ -18,7 +17,6 @@ export const CalendarGrid: React.FC<CalendarGridProps> = ({
   occurrencesByDateKey,
   selectedDay,
   today,
-  gridMode,
   onSelectDay,
 }) => {
   const isSameDay = (a: Date, b: Date) =>
@@ -56,7 +54,6 @@ export const CalendarGrid: React.FC<CalendarGridProps> = ({
               isSelected={isSelected}
               isToday={isToday}
               occurrences={dayOccurrences}
-              gridMode={gridMode}
               onClick={onSelectDay}
             />
           );

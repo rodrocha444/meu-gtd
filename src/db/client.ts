@@ -8,6 +8,7 @@ import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
 import { asc } from 'drizzle-orm';
 import * as schema from './schema';
 import type { TaskPriority, TaskStatus, RecurrenceMode } from './schema';
+import type { TaskReminder } from '../types/task';
 
 /**
  * Cliente Turso Cloud direto via HTTP/Hrana + Drizzle ORM
@@ -183,7 +184,7 @@ export const GTD_SYSTEM_LISTS: ReadonlyArray<schema.NewListRecord> = [
   },
 ];
 
-export interface TaskRecordWithTags {
+export interface TaskRecordUI {
   id: string;
   title: string;
   description: string;
@@ -193,14 +194,16 @@ export interface TaskRecordWithTags {
   dueDate: number | null;
   recurrenceRule: string | null;
   recurrenceMode: RecurrenceMode;
+  reminders?: TaskReminder[];
   listId: string;
   parentTaskId: string | null;
-  tags: string[];
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
 }
+
+export type TaskRecordWithTags = TaskRecordUI;
 
 export interface ListRecordUI {
   id: string;
@@ -217,6 +220,13 @@ export interface ListRecordUI {
 export async function fetchListsFromDb(): Promise<ListRecordUI[]> {
   return withDatabaseTimeout(
     async () => {
+      // 0. Garante defensivamente que colunas novas existam no SQLite
+      try {
+        await libsqlClient.execute('ALTER TABLE tasks ADD COLUMN reminders TEXT');
+      } catch {
+        // Coluna já existe
+      }
+
       // 1. Garante que todas as listas do sistema GTD existam no banco com INSERT OR IGNORE
       const seedBatch = GTD_SYSTEM_LISTS.map((sysList) => ({
         sql: `INSERT OR IGNORE INTO lists (id, name, color, icon, is_gtd_system, sort_order, created_at)
@@ -246,6 +256,7 @@ export async function fetchListsFromDb(): Promise<ListRecordUI[]> {
         icon: String(l.icon),
         isGtdSystem: Boolean(l.isGtdSystem),
         sortOrder: Number.isFinite(Number(l.sortOrder)) ? Number(l.sortOrder) : 0,
+        createdAt: l.createdAt ? new Date(l.createdAt).getTime() : Date.now(),
       }));
     },
     DB_OPERATION_TIMEOUT_MS,
@@ -272,29 +283,35 @@ function parseSafeTimestamp(value: unknown): number | null {
 }
 
 /**
- * Carrega todas as tarefas com suas respectivas tags do Turso Cloud, com sanitização defensiva
+ * Carrega todas as tarefas do Turso Cloud, com sanitização defensiva
  */
-export async function fetchTasksFromDb(): Promise<TaskRecordWithTags[]> {
+export async function fetchTasksFromDb(): Promise<TaskRecordUI[]> {
   return withDatabaseTimeout(
     async () => {
+      // 0. Garante defensivamente que a coluna de lembretes exista no SQLite/Turso
+      try {
+        await libsqlClient.execute('ALTER TABLE tasks ADD COLUMN reminders TEXT');
+      } catch {
+        // Coluna já existe
+      }
+
       const allTasks = await db
         .select()
         .from(schema.tasks)
         .orderBy(asc(schema.tasks.sortOrder));
 
-      const allTaskTags = await db.select().from(schema.taskTags);
-
-      const tagsByTaskId = new Map<string, string[]>();
-      for (const tt of allTaskTags) {
-        if (!tt.taskId || !tt.tagId) continue;
-        const list = tagsByTaskId.get(tt.taskId) ?? [];
-        list.push(String(tt.tagId));
-        tagsByTaskId.set(tt.taskId, list);
-      }
-
       return allTasks.map((t) => {
         const createdAtSafe = parseSafeTimestamp(t.createdAt) ?? Date.now();
         const updatedAtSafe = parseSafeTimestamp(t.updatedAt) ?? createdAtSafe;
+        let parsedReminders: TaskReminder[] = [];
+        if (t.reminders) {
+          try {
+            parsedReminders = JSON.parse(String(t.reminders));
+          } catch {
+            parsedReminders = [];
+          }
+        }
+
         return {
           id: String(t.id),
           title: String(t.title ?? ''),
@@ -305,9 +322,9 @@ export async function fetchTasksFromDb(): Promise<TaskRecordWithTags[]> {
           dueDate: parseSafeTimestamp(t.dueDate),
           recurrenceRule: t.recurrenceRule ? String(t.recurrenceRule) : null,
           recurrenceMode: t.recurrenceMode === 'after_completion' ? 'after_completion' : 'fixed',
+          reminders: parsedReminders,
           listId: String(t.listId ?? 'inbox'),
           parentTaskId: t.parentTaskId ? String(t.parentTaskId) : null,
-          tags: tagsByTaskId.get(t.id) ?? [],
           sortOrder: Number.isFinite(Number(t.sortOrder)) ? Number(t.sortOrder) : 0,
           createdAt: createdAtSafe,
           updatedAt: updatedAtSafe,
@@ -323,16 +340,16 @@ export async function fetchTasksFromDb(): Promise<TaskRecordWithTags[]> {
 /**
  * Insere uma nova tarefa no Turso Cloud em uma transação atômica única (batch)
  */
-export async function createTaskInDb(task: TaskRecordWithTags): Promise<void> {
+export async function createTaskInDb(task: TaskRecordUI): Promise<void> {
   return withDatabaseTimeout(
     async () => {
       const statements: InStatement[] = [
         {
           sql: `INSERT OR REPLACE INTO tasks (
             id, title, description, status, priority, is_pinned, due_date,
-            recurrence_rule, recurrence_mode, list_id, parent_task_id,
+            recurrence_rule, recurrence_mode, reminders, list_id, parent_task_id,
             sort_order, created_at, updated_at, completed_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           args: [
             task.id,
             task.title,
@@ -343,6 +360,9 @@ export async function createTaskInDb(task: TaskRecordWithTags): Promise<void> {
             task.dueDate !== null ? task.dueDate : null,
             task.recurrenceRule ?? null,
             task.recurrenceMode ?? 'fixed',
+            task.reminders && task.reminders.length > 0
+              ? JSON.stringify(task.reminders)
+              : null,
             task.listId,
             task.parentTaskId ?? null,
             task.sortOrder ?? 0,
@@ -352,19 +372,6 @@ export async function createTaskInDb(task: TaskRecordWithTags): Promise<void> {
           ],
         },
       ];
-
-      if (task.tags && task.tags.length > 0) {
-        for (const tag of task.tags) {
-          statements.push({
-            sql: 'INSERT OR IGNORE INTO tags (id, name, color) VALUES (?, ?, ?)',
-            args: [tag, tag, '#10b981'],
-          });
-          statements.push({
-            sql: 'INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)',
-            args: [task.id, tag],
-          });
-        }
-      }
 
       await libsqlClient.batch(statements, 'write');
     },
@@ -378,8 +385,7 @@ export async function createTaskInDb(task: TaskRecordWithTags): Promise<void> {
  */
 export async function updateTaskInDb(
   taskId: string,
-  updates: Partial<Omit<TaskRecordWithTags, 'id'>>,
-  tags?: string[]
+  updates: Partial<Omit<TaskRecordUI, 'id'>>
 ): Promise<void> {
   return withDatabaseTimeout(
     async () => {
@@ -420,6 +426,14 @@ export async function updateTaskInDb(
         setClauses.push('recurrence_mode = ?');
         setArgs.push(updates.recurrenceMode);
       }
+      if (updates.reminders !== undefined) {
+        setClauses.push('reminders = ?');
+        setArgs.push(
+          updates.reminders && updates.reminders.length > 0
+            ? JSON.stringify(updates.reminders)
+            : null
+        );
+      }
       if (updates.listId !== undefined) {
         setClauses.push('list_id = ?');
         setArgs.push(updates.listId);
@@ -443,23 +457,6 @@ export async function updateTaskInDb(
         args: setArgs,
       });
 
-      if (tags !== undefined) {
-        statements.push({
-          sql: 'DELETE FROM task_tags WHERE task_id = ?',
-          args: [taskId],
-        });
-        for (const tag of tags) {
-          statements.push({
-            sql: 'INSERT OR IGNORE INTO tags (id, name, color) VALUES (?, ?, ?)',
-            args: [tag, tag, '#10b981'],
-          });
-          statements.push({
-            sql: 'INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)',
-            args: [taskId, tag],
-          });
-        }
-      }
-
       await libsqlClient.batch(statements, 'write');
     },
     DB_OPERATION_TIMEOUT_MS,
@@ -475,7 +472,6 @@ export async function deleteTaskInDb(taskId: string): Promise<void> {
     async () => {
       await libsqlClient.batch(
         [
-          { sql: 'DELETE FROM task_tags WHERE task_id = ?', args: [taskId] },
           { sql: 'DELETE FROM tasks WHERE parent_task_id = ?', args: [taskId] },
           { sql: 'DELETE FROM tasks WHERE id = ?', args: [taskId] },
         ],
@@ -509,7 +505,7 @@ export async function createListInDb(list: ListRecordUI): Promise<void> {
 }
 
 /**
- * Remove uma lista ou projeto do Turso Cloud e move suas tarefas para a Inbox em transação atômica (batch)
+ * Remove uma lista ou projeto do Turso Cloud e exclui permanentemente todas as suas tarefas vinculadas
  */
 export async function deleteListInDb(listId: string): Promise<void> {
   return withDatabaseTimeout(
@@ -517,8 +513,12 @@ export async function deleteListInDb(listId: string): Promise<void> {
       await libsqlClient.batch(
         [
           {
-            sql: 'UPDATE tasks SET list_id = ?, updated_at = ? WHERE list_id = ?',
-            args: ['inbox', Date.now(), listId],
+            sql: 'DELETE FROM tasks WHERE parent_task_id IN (SELECT id FROM tasks WHERE list_id = ?)',
+            args: [listId],
+          },
+          {
+            sql: 'DELETE FROM tasks WHERE list_id = ?',
+            args: [listId],
           },
           {
             sql: 'DELETE FROM lists WHERE id = ?',

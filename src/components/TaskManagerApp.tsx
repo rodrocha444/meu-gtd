@@ -6,21 +6,23 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import type { TaskPriority, TaskStatus } from '../db/schema';
+import type { TaskStatus } from '../db/schema';
+import { GTD_SYSTEM_LISTS } from '../db/client';
+import { performFullSync } from '../db/syncManager';
 import {
-  createTaskInDb,
-  updateTaskInDb,
-  deleteTaskInDb,
-  createListInDb,
-  deleteListInDb,
-  fetchListsFromDb,
-  fetchTasksFromDb,
-  syncEmbeddedReplica,
-  GTD_SYSTEM_LISTS,
-} from '../db/client';
+  enqueueMutation,
+  getPendingCount,
+  applyPendingMutationsToTasks,
+  applyPendingMutationsToLists,
+} from '../db/syncQueue';
 import { NativeBridge } from '../lib/native';
+import { NotificationService } from '../lib/notifications';
 import { parseQuickCaptureInput } from '../utils/nlpParser';
 import { calculateNextDueDate } from '../utils/recurrence';
+import {
+  compareTasksByDayThenPriority,
+  compareCompletedTasks,
+} from '../utils/taskSorter';
 import { CalendarView } from './CalendarView';
 import type { CustomSelectOption } from './ui/CustomControls';
 import {
@@ -51,9 +53,19 @@ const CACHE_KEYS = {
 function loadCachedLists(): UIList[] {
   try {
     const raw = localStorage.getItem(CACHE_KEYS.LISTS);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : [];
+    const parsed = raw ? JSON.parse(raw) : [];
+    const base: UIList[] =
+      Array.isArray(parsed) && parsed.length > 0
+        ? parsed
+        : GTD_SYSTEM_LISTS.map((l) => ({
+            id: l.id,
+            name: l.name,
+            color: l.color ?? '#6366f1',
+            icon: l.icon ?? 'inbox',
+            isGtdSystem: Boolean(l.isGtdSystem),
+            sortOrder: l.sortOrder ?? 0,
+          }));
+    return applyPendingMutationsToLists(base);
   } catch {
     return [];
   }
@@ -64,7 +76,8 @@ function loadCachedTasks(): UITask[] {
     const raw = localStorage.getItem(CACHE_KEYS.TASKS);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    const base: UITask[] = Array.isArray(parsed) ? parsed : [];
+    return applyPendingMutationsToTasks(base as any) as UITask[];
   } catch {
     return [];
   }
@@ -81,7 +94,7 @@ function saveCache(lists: UIList[], tasks: UITask[]) {
 
 /**
  * Componente Principal da Aplicação (TickTick Core + Método GTD + Calendário & Repetições)
- * Orquestrador estruturado segundo Atomic Design
+ * Orquestrador estruturado segundo Atomic Design com arquitetura Offline-First (Local-First)
  */
 export const TaskManagerApp: React.FC = () => {
   const [lists, setLists] = useState<UIList[]>(() => {
@@ -97,6 +110,7 @@ export const TaskManagerApp: React.FC = () => {
     }));
   });
   const [tasks, setTasks] = useState<UITask[]>(() => loadCachedTasks());
+  const [pendingCount, setPendingCount] = useState<number>(() => getPendingCount());
   const [isLoading, setIsLoading] = useState<boolean>(() => loadCachedTasks().length === 0);
   const hasUserSelectedViewRef = useRef(false);
   const [activeView, setActiveView] = useState<SmartViewId>(() => {
@@ -108,6 +122,12 @@ export const TaskManagerApp: React.FC = () => {
   });
   const [viewLayout, setViewLayout] = useState<'list' | 'calendar'>('list');
 
+  // Refs para dados mais recentes durante sincronização assíncrona
+  const listsRef = useRef(lists);
+  listsRef.current = lists;
+  const tasksRef = useRef(tasks);
+  tasksRef.current = tasks;
+
   // Navegação explícita com registro de escolha do usuário
   const handleSelectView = (viewId: SmartViewId) => {
     hasUserSelectedViewRef.current = true;
@@ -118,7 +138,9 @@ export const TaskManagerApp: React.FC = () => {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [triageTask, setTriageTask] = useState<UITask | null>(null);
   const [quickInput, setQuickInput] = useState<string>('');
-  const [syncState, setSyncState] = useState<'synced' | 'syncing' | 'offline'>('synced');
+  const [syncState, setSyncState] = useState<'synced' | 'syncing' | 'offline'>(() => {
+    return typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'synced';
+  });
   const [recurrenceBanner, setRecurrenceBanner] = useState<string | null>(null);
   const [dbError, setDbError] = useState<DatabaseErrorInfo | null>(null);
 
@@ -132,6 +154,15 @@ export const TaskManagerApp: React.FC = () => {
 
   // Helper unificado para contagem de tarefas pendentes ou concluídas por view
   const getTaskCountForView = (viewId: string): number => {
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+    const endOfTodayTime = endOfToday.getTime();
+
+    const tenDaysFromNow = new Date();
+    tenDaysFromNow.setDate(tenDaysFromNow.getDate() + 10);
+    tenDaysFromNow.setHours(23, 59, 59, 999);
+    const tenDaysTime = tenDaysFromNow.getTime();
+
     return tasks.filter(
       (t) =>
         t.parentTaskId === null &&
@@ -139,14 +170,17 @@ export const TaskManagerApp: React.FC = () => {
           ? t.status === 'completed'
           : t.status === 'pending' &&
             (viewId === 'today'
-              ? t.dueDate !== null && t.dueDate <= Date.now() + 86_400_000
-              : viewId === 'next_7_days'
-              ? t.dueDate !== null
+              ? t.dueDate !== null && t.dueDate <= endOfTodayTime
+              : viewId === 'next_days' || viewId === 'next_7_days'
+              ? t.dueDate !== null && t.dueDate > endOfTodayTime
+              : viewId === 'next_actions'
+              ? t.listId === 'next_actions' &&
+                (t.dueDate === null || t.dueDate <= tenDaysTime)
               : t.listId === viewId))
     ).length;
   };
 
-  // Notificador unificado de erros de persistência ou rede no banco de dados
+  // Notificador unificado de erros de persistência (apenas para erros críticos não relacionados a offline)
   const reportDbError = (params: {
     operation: string;
     error: unknown;
@@ -154,9 +188,13 @@ export const TaskManagerApp: React.FC = () => {
     customMessage?: string;
     onRetry?: () => Promise<void> | void;
   }) => {
-    void NativeBridge.hapticError();
-    setSyncState('offline');
     const isNet = isNetworkOrOfflineError(params.error);
+    if (isNet) {
+      setSyncState('offline');
+      return;
+    }
+
+    void NativeBridge.hapticError();
     const detailMsg =
       params.error instanceof Error
         ? params.error.message
@@ -165,62 +203,64 @@ export const TaskManagerApp: React.FC = () => {
         : 'Erro inesperado na comunicação com o banco de dados';
 
     setDbError({
-      title:
-        params.customTitle ??
-        (isNet ? 'Sem Conexão com o Banco' : 'Erro no Banco de Dados'),
+      title: params.customTitle ?? 'Erro no Banco de Dados',
       message:
         params.customMessage ??
-        (isNet
-          ? 'Não foi possível sincronizar suas alterações devido à falta de conexão com a internet. Verifique sua rede e tente novamente.'
-          : 'Ocorreu um erro ao comunicar com o banco de dados. A alteração não pôde ser salva na nuvem.'),
+        'Ocorreu um erro ao comunicar com o banco de dados. A alteração foi salva localmente.',
       operation: params.operation,
       detail: detailMsg,
-      isNetworkError: isNet,
+      isNetworkError: false,
       onRetry: params.onRetry,
     });
   };
 
-  // Carregamento de Listas e Tarefas direto do banco de dados
-  const loadData = async (isMounted = true) => {
-    try {
-      setIsLoading(true);
-      const [loadedLists, loadedTasks] = await Promise.all([
-        fetchListsFromDb(),
-        fetchTasksFromDb(),
-      ]);
-      if (isMounted) {
-        setLists(loadedLists);
-        setTasks(loadedTasks);
-        saveCache(loadedLists, loadedTasks);
-        setSyncState('synced');
+  // Executa sincronização bidirecional em segundo plano (Push Outbox + Pull Remoto com reconciliação LWW)
+  const triggerSync = async (isManual = false) => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setSyncState('offline');
+      if (isManual) {
+        void NativeBridge.hapticLightImpact();
+      }
+      return;
+    }
 
-        // Se o usuário ainda não escolheu uma tela manualmente, abre 'today' se o inbox estiver vazio
-        if (!hasUserSelectedViewRef.current) {
-          const hasInboxTasks = loadedTasks.some(
-            (t) => t.parentTaskId === null && t.status === 'pending' && t.listId === 'inbox'
-          );
-          setActiveView(hasInboxTasks ? 'inbox' : 'today');
+    setSyncState('syncing');
+    try {
+      const result = await performFullSync(listsRef.current, tasksRef.current);
+      if (result.offline) {
+        setSyncState('offline');
+        if (isManual) {
+          void NativeBridge.hapticLightImpact();
+        }
+      } else if (result.success) {
+        if (result.lists && result.tasks) {
+          listsRef.current = result.lists;
+          tasksRef.current = result.tasks;
+          setLists(result.lists);
+          setTasks(result.tasks);
+          saveCache(result.lists, result.tasks);
+
+          if (!hasUserSelectedViewRef.current) {
+            const hasInboxTasks = result.tasks.some(
+              (t) => t.parentTaskId === null && t.status === 'pending' && t.listId === 'inbox'
+            );
+            setActiveView(hasInboxTasks ? 'inbox' : 'today');
+          }
+        }
+        setSyncState('synced');
+        if (isManual) {
+          void NativeBridge.hapticSwipeAction();
         }
       }
-    } catch (err) {
-      console.error('Erro ao conectar ao banco de dados:', err);
-      if (isMounted) {
-        setSyncState('offline');
-        reportDbError({
-          operation: 'Carregamento Inicial de Tarefas e Listas',
-          error: err,
-          customTitle: 'Falha ao Carregar Dados',
-          customMessage:
-            'Não foi possível carregar as tarefas e listas. Verifique sua conexão com a internet.',
-          onRetry: async () => {
-            await loadData(true);
-          },
-        });
-      }
+    } catch (err: unknown) {
+      console.warn('Erro ao sincronizar com Turso Cloud:', err);
+      setSyncState('offline');
+      reportDbError({
+        operation: 'Sincronização',
+        error: err,
+      });
     } finally {
-      if (isMounted) {
-        setIsLoading(false);
-      }
+      setIsLoading(false);
     }
   };
 
@@ -231,22 +271,36 @@ export const TaskManagerApp: React.FC = () => {
     }
   }, [lists, tasks]);
 
+  // Listener para atualizações na fila de sincronização (outbox)
   useEffect(() => {
-    let isMounted = true;
-    void loadData(isMounted);
-    return () => {
-      isMounted = false;
+    const handleQueueChange = (e: Event) => {
+      const custom = e as CustomEvent<{ pendingCount: number }>;
+      if (custom.detail && typeof custom.detail.pendingCount === 'number') {
+        setPendingCount(custom.detail.pendingCount);
+      } else {
+        setPendingCount(getPendingCount());
+      }
     };
+    window.addEventListener('meu_gtd_sync_queue_change', handleQueueChange);
+    return () => {
+      window.removeEventListener('meu_gtd_sync_queue_change', handleQueueChange);
+    };
+  }, []);
+
+  // Inicialização Local-First: dados locais já exibidos; sincroniza novidades se online
+  useEffect(() => {
+    void triggerSync(false);
+    void NotificationService.requestPermissions().then((granted) => {
+      if (granted && tasksRef.current.length > 0) {
+        void NotificationService.syncAllReminders(tasksRef.current);
+      }
+    });
   }, []);
 
   // Monitora conectividade online/offline da rede
   useEffect(() => {
     const handleOnline = () => {
-      void syncEmbeddedReplica().then((res) => {
-        if (!res.offline) {
-          setSyncState('synced');
-        }
-      });
+      void triggerSync(false);
     };
     const handleOffline = () => {
       setSyncState('offline');
@@ -323,7 +377,6 @@ export const TaskManagerApp: React.FC = () => {
     startOfToday.setHours(0, 0, 0, 0);
     const endOfToday = new Date();
     endOfToday.setHours(23, 59, 59, 999);
-    const endOfNext7Days = new Date(startOfToday.getTime() + 7 * 86_400_000);
 
     return tasks
       .filter((t) => t.parentTaskId === null)
@@ -348,46 +401,56 @@ export const TaskManagerApp: React.FC = () => {
               t.completedAt <= endOfToday.getTime())
           );
         }
-        if (activeView === 'next_7_days') {
+        if (activeView === 'next_days' || activeView === 'next_7_days') {
           return (
             t.dueDate !== null &&
-            t.dueDate >= startOfToday.getTime() &&
-            t.dueDate <= endOfNext7Days.getTime()
+            t.dueDate > endOfToday.getTime() &&
+            t.status === 'pending'
           );
         }
         return t.listId === activeView;
       })
       .sort((a, b) => {
         if (activeView === 'completed') {
-          const timeA = a.completedAt ?? a.updatedAt;
-          const timeB = b.completedAt ?? b.updatedAt;
-          return timeB - timeA;
+          return compareCompletedTasks(a, b);
         }
-        // Pinned primeiro -> Pendentes antes de Concluídas -> Maior Prioridade -> Ordem
-        if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
-        if ((a.status === 'pending') !== (b.status === 'pending')) {
-          return a.status === 'pending' ? -1 : 1;
-        }
-        if (a.priority !== b.priority) return b.priority - a.priority;
-        return a.sortOrder - b.sortOrder;
+        return compareTasksByDayThenPriority(a, b);
       });
   }, [tasks, activeView]);
 
-  // Separa tarefas pendentes e concluídas da visão ativa
-  const { pendingRootTasks, completedRootTasks } = useMemo(() => {
+  // Separa tarefas pendentes, futuras (para a lista especial Ações Seguintes) e concluídas
+  const { pendingRootTasks, futureRootTasks, completedRootTasks } = useMemo(() => {
     if (activeView === 'completed') {
-      return { pendingRootTasks: [], completedRootTasks: filteredRootTasks };
+      return { pendingRootTasks: [], futureRootTasks: [], completedRootTasks: filteredRootTasks };
     }
+
+    const tenDaysFromNow = new Date();
+    tenDaysFromNow.setDate(tenDaysFromNow.getDate() + 10);
+    tenDaysFromNow.setHours(23, 59, 59, 999);
+    const tenDaysTime = tenDaysFromNow.getTime();
+
     const pending: UITask[] = [];
+    const future: UITask[] = [];
     const completed: UITask[] = [];
+
     for (const t of filteredRootTasks) {
       if (t.status === 'completed') {
         completed.push(t);
+      } else if (
+        activeView === 'next_actions' &&
+        t.dueDate !== null &&
+        t.dueDate > tenDaysTime
+      ) {
+        future.push(t);
       } else {
         pending.push(t);
       }
     }
-    return { pendingRootTasks: pending, completedRootTasks: completed };
+    return {
+      pendingRootTasks: pending,
+      futureRootTasks: future,
+      completedRootTasks: completed,
+    };
   }, [filteredRootTasks, activeView]);
 
   // Estatísticas de saúde GTD dos Projetos (Weekly Review)
@@ -404,10 +467,12 @@ export const TaskManagerApp: React.FC = () => {
         (t) => t.status === 'pending'
       ).length;
       const totalTasks = projTasks.length;
-      const percentCompleted =
-        totalTasks > 0
-          ? Math.round((completedTasks / totalTasks) * 100)
-          : 0;
+      const createdAt =
+        typeof p.createdAt === 'number' && p.createdAt > 0
+          ? p.createdAt
+          : p.id.startsWith('proj-')
+          ? Number(p.id.replace('proj-', '')) || Date.now()
+          : Date.now();
       return {
         id: p.id,
         name: p.name,
@@ -415,7 +480,7 @@ export const TaskManagerApp: React.FC = () => {
         totalTasks,
         completedTasks,
         pendingTasks,
-        percentCompleted,
+        createdAt,
       };
     });
   }, [lists, tasks]);
@@ -425,13 +490,15 @@ export const TaskManagerApp: React.FC = () => {
     const cleanName = name.trim();
     if (!cleanName) return;
 
+    const now = Date.now();
     const newProj: UIList = {
-      id: `proj-${Date.now()}`,
+      id: `proj-${now}`,
       name: cleanName,
       color: color,
       icon: 'folder',
       isGtdSystem: false,
       sortOrder: lists.length + 1,
+      createdAt: now,
     };
 
     setLists((prev) => [...prev, newProj]);
@@ -439,47 +506,49 @@ export const TaskManagerApp: React.FC = () => {
     void NativeBridge.hapticSwipeAction();
     setActiveView(newProj.id);
 
-    void createListInDb(newProj).catch((err: unknown) => {
-      console.error('Erro ao persistir novo projeto no Turso:', err);
-      reportDbError({
-        operation: `Criar Projeto "${newProj.name}"`,
-        error: err,
-        onRetry: async () => {
-          await createListInDb(newProj);
-        },
-      });
-    });
+    enqueueMutation({ type: 'CREATE_LIST', list: newProj, createdAt: now });
+    void triggerSync();
   };
 
-  // Excluir Projeto GTD
+  // Excluir Projeto GTD (remoção permanente do projeto e de suas ações vinculadas)
   const handleConfirmDeleteProject = () => {
     if (!projectToDelete || projectToDelete.isGtdSystem) return;
     const targetId = projectToDelete.id;
 
     void NativeBridge.hapticLightImpact();
-    setTasks((prev) =>
-      prev.map((t) =>
-        t.listId === targetId
-          ? { ...t, listId: 'inbox', updatedAt: Date.now() }
-          : t
-      )
+    // Exclui todas as tarefas e subtarefas pertencentes a este projeto
+    const updatedTasks = tasks.filter(
+      (t) => t.listId !== targetId && t.parentTaskId !== targetId
     );
-    setLists((prev) => prev.filter((l) => l.id !== targetId));
+    const updatedLists = lists.filter((l) => l.id !== targetId);
+
+    // Atualiza refs e cache imediatamente para que a sincronização assíncrona não ressuscite os dados
+    tasksRef.current = updatedTasks;
+    listsRef.current = updatedLists;
+    setTasks(updatedTasks);
+    setLists(updatedLists);
+    saveCache(updatedLists, updatedTasks);
+
+    if (selectedTaskId && tasks.some((t) => t.id === selectedTaskId && t.listId === targetId)) {
+      setSelectedTaskId(null);
+    }
+    if (triageTask && triageTask.listId === targetId) {
+      setTriageTask(null);
+    }
+    if (taskToDelete && taskToDelete.listId === targetId) {
+      setTaskToDelete(null);
+    }
+    if (taskToComplete && taskToComplete.listId === targetId) {
+      setTaskToComplete(null);
+    }
+
     if (activeView === targetId) {
       setActiveView('projects');
     }
     setProjectToDelete(null);
 
-    void deleteListInDb(targetId).catch((err: unknown) => {
-      console.error('Erro ao excluir projeto no Turso:', err);
-      reportDbError({
-        operation: 'Excluir Projeto',
-        error: err,
-        onRetry: async () => {
-          await deleteListInDb(targetId);
-        },
-      });
-    });
+    enqueueMutation({ type: 'DELETE_LIST', listId: targetId });
+    void triggerSync();
   };
 
   // Excluir Tarefa GTD
@@ -488,9 +557,10 @@ export const TaskManagerApp: React.FC = () => {
     const targetId = taskToDelete.id;
 
     void NativeBridge.hapticLightImpact();
-    setTasks((prev) =>
-      prev.filter((t) => t.id !== targetId && t.parentTaskId !== targetId)
-    );
+    const updatedTasks = tasks.filter((t) => t.id !== targetId && t.parentTaskId !== targetId);
+    tasksRef.current = updatedTasks;
+    setTasks(updatedTasks);
+    saveCache(listsRef.current, updatedTasks);
 
     if (selectedTaskId === targetId) {
       setSelectedTaskId(null);
@@ -518,16 +588,9 @@ export const TaskManagerApp: React.FC = () => {
 
     setTaskToDelete(null);
 
-    void deleteTaskInDb(targetId).catch((err: unknown) => {
-      console.error('Erro ao excluir tarefa no Turso:', err);
-      reportDbError({
-        operation: 'Excluir Tarefa',
-        error: err,
-        onRetry: async () => {
-          await deleteTaskInDb(targetId);
-        },
-      });
-    });
+    void NotificationService.cancelTaskReminders(targetId);
+    enqueueMutation({ type: 'DELETE_TASK', taskId: targetId });
+    void triggerSync();
   };
 
   // Limpar todas as tarefas concluídas do sistema
@@ -543,39 +606,24 @@ export const TaskManagerApp: React.FC = () => {
     setIsClearCompletedModalOpen(false);
 
     for (const id of completedIds) {
-      void deleteTaskInDb(id).catch((err) => {
-        console.error('Erro ao excluir tarefa concluída no Turso:', err);
-        reportDbError({
-          operation: 'Limpar Tarefas Concluídas',
-          error: err,
-          onRetry: async () => {
-            await Promise.all(completedIds.map((cId) => deleteTaskInDb(cId)));
-          },
-        });
-      });
+      enqueueMutation({ type: 'DELETE_TASK', taskId: id });
     }
+    void triggerSync();
   };
 
   // Excluir Subtarefa individualmente
   const handleDeleteSubtask = (subtaskId: string) => {
     void NativeBridge.hapticLightImpact();
     setTasks((prev) => prev.filter((t) => t.id !== subtaskId));
-    void deleteTaskInDb(subtaskId).catch((err: unknown) => {
-      console.error('Erro ao excluir subtarefa no Turso:', err);
-      reportDbError({
-        operation: 'Excluir Subtarefa',
-        error: err,
-        onRetry: async () => {
-          await deleteTaskInDb(subtaskId);
-        },
-      });
-    });
+    enqueueMutation({ type: 'DELETE_TASK', taskId: subtaskId });
+    void triggerSync();
   };
 
   // Promover Tarefa Multi-etapas da Inbox para Projeto GTD
   const handlePromoteTaskToProject = (task: UITask) => {
+    const now = Date.now();
     void NativeBridge.hapticTaskComplete();
-    const newProjId = `proj-${Date.now()}`;
+    const newProjId = `proj-${now}`;
     const newProj: UIList = {
       id: newProjId,
       name: task.title,
@@ -583,14 +631,17 @@ export const TaskManagerApp: React.FC = () => {
       icon: 'folder',
       isGtdSystem: false,
       sortOrder: lists.length + 1,
+      createdAt: now,
     };
+
+    const subtasks = tasks.filter((t) => t.parentTaskId === task.id);
 
     setTasks((prev) =>
       prev
         .filter((t) => t.id !== task.id)
         .map((t) =>
           t.parentTaskId === task.id
-            ? { ...t, parentTaskId: null, listId: newProjId, updatedAt: Date.now() }
+            ? { ...t, parentTaskId: null, listId: newProjId, updatedAt: now }
             : t
         )
     );
@@ -600,26 +651,17 @@ export const TaskManagerApp: React.FC = () => {
     setSelectedTaskId(null);
     setActiveView(newProjId);
 
-    void createListInDb(newProj).catch((err: unknown) => {
-      console.error('Erro ao promover tarefa a projeto no Turso:', err);
-      reportDbError({
-        operation: `Criar Projeto da Tarefa "${newProj.name}"`,
-        error: err,
-        onRetry: async () => {
-          await createListInDb(newProj);
-        },
+    enqueueMutation({ type: 'CREATE_LIST', list: newProj, createdAt: now });
+    enqueueMutation({ type: 'DELETE_TASK', taskId: task.id, deletedAt: now });
+    for (const sub of subtasks) {
+      enqueueMutation({
+        type: 'UPDATE_TASK',
+        taskId: sub.id,
+        updates: { parentTaskId: null, listId: newProjId },
+        updatedAt: now,
       });
-    });
-    void deleteTaskInDb(task.id).catch((err: unknown) => {
-      console.error('Erro ao remover tarefa promovida no Turso:', err);
-      reportDbError({
-        operation: 'Remover Tarefa Promovida a Projeto',
-        error: err,
-        onRetry: async () => {
-          await deleteTaskInDb(task.id);
-        },
-      });
-    });
+    }
+    void triggerSync();
   };
 
   const selectedTask = useMemo(
@@ -647,6 +689,7 @@ export const TaskManagerApp: React.FC = () => {
 
     let resolvedListId =
       activeView === 'today' ||
+      activeView === 'next_days' ||
       activeView === 'next_7_days' ||
       activeView === 'calendar' ||
       activeView === 'completed'
@@ -664,12 +707,12 @@ export const TaskManagerApp: React.FC = () => {
       }
     }
 
-    const defaultDueDate =
-      parsed.dueDate ??
-      (activeView === 'today' || activeView === 'calendar' ? Date.now() : null);
+    // Tarefas criadas sem data explícita nunca recebem vencimento automático, preservando o fluxo GTD
+    const defaultDueDate = parsed.dueDate ?? null;
 
+    const now = Date.now();
     const newTask: UITask = {
-      id: `task-${Date.now()}`,
+      id: `task-${now}`,
       title: finalTitle,
       description: '',
       status: 'pending',
@@ -678,79 +721,27 @@ export const TaskManagerApp: React.FC = () => {
       dueDate: defaultDueDate,
       recurrenceRule: parsed.recurrenceRule,
       recurrenceMode: parsed.recurrenceMode,
+      reminders: parsed.reminders ?? [],
       listId: resolvedListId,
       parentTaskId: null,
-      tags: parsed.tags,
       sortOrder: tasks.length + 1,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+      createdAt: now,
+      updatedAt: now,
       completedAt: null,
     };
 
-    setTasks((prev) => [newTask, ...prev]);
+    const nextTasks = [newTask, ...tasksRef.current];
+    tasksRef.current = nextTasks;
+    setTasks(nextTasks);
+    saveCache(listsRef.current, nextTasks);
     setQuickInput('');
     void NativeBridge.hapticLightImpact();
-    void createTaskInDb(newTask).catch((err) => {
-      console.error('Erro ao salvar tarefa no Turso Cloud:', err);
-      reportDbError({
-        operation: `Salvar Tarefa "${newTask.title}"`,
-        error: err,
-        onRetry: async () => {
-          await createTaskInDb(newTask);
-        },
-      });
-    });
+    void NotificationService.scheduleTaskReminders(newTask);
+    enqueueMutation({ type: 'CREATE_TASK', task: newTask, createdAt: now });
+    void triggerSync();
   };
 
-  // Criar tarefa/evento diretamente de um dia do Calendário
-  const handleCreateTaskFromCalendar = (params: {
-    title: string;
-    dueDate: number;
-    recurrenceRule: string | null;
-    recurrenceMode: any;
-    tags: string[];
-    priority: TaskPriority;
-  }) => {
-    const targetListId =
-      activeView !== 'calendar' &&
-      activeView !== 'today' &&
-      activeView !== 'next_7_days'
-        ? activeView
-        : 'pessoal';
-
-    const newTask: UITask = {
-      id: `task-${Date.now()}`,
-      title: params.title,
-      description: '',
-      status: 'pending',
-      priority: params.priority,
-      isPinned: false,
-      dueDate: params.dueDate,
-      recurrenceRule: params.recurrenceRule,
-      recurrenceMode: params.recurrenceMode,
-      listId: listMap[targetListId] ? targetListId : 'inbox',
-      parentTaskId: null,
-      tags: params.tags,
-      sortOrder: tasks.length + 1,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      completedAt: null,
-    };
-
-    setTasks((prev) => [newTask, ...prev]);
-    void createTaskInDb(newTask).catch((err) => {
-      console.error('Erro ao salvar evento no Turso Cloud:', err);
-      reportDbError({
-        operation: `Criar Tarefa no Calendário "${newTask.title}"`,
-        error: err,
-        onRetry: async () => {
-          await createTaskInDb(newTask);
-        },
-      });
-    });
-  };
-
-  // Executar a transição de status de fato (Pending / Completed / Won't Do) + Repetições GTD
+  // Executar a transição de status de fato (Pending / Completed) + Repetições GTD
   const executeToggleStatus = (task: UITask, nextStatus: TaskStatus) => {
     const now = Date.now();
 
@@ -778,6 +769,7 @@ export const TaskManagerApp: React.FC = () => {
         id: `task-${now}-rec`,
         status: 'pending',
         dueDate: nextDueDate,
+        reminders: task.reminders,
         createdAt: now,
         updatedAt: now,
         completedAt: null,
@@ -798,9 +790,12 @@ export const TaskManagerApp: React.FC = () => {
         `🔁 Próxima ocorrência de "${task.title}" agendada para ${formattedNextDate} (${modeDescription}).`
       );
 
-      setTasks((prev) => [
+      void NotificationService.cancelTaskReminders(task.id);
+      void NotificationService.scheduleTaskReminders(nextOccurrenceTask);
+
+      const nextTasks = [
         nextOccurrenceTask,
-        ...prev.map((item) =>
+        ...tasksRef.current.map((item) =>
           item.id === task.id
             ? {
                 ...item,
@@ -810,68 +805,58 @@ export const TaskManagerApp: React.FC = () => {
               }
             : item
         ),
-      ]);
+      ];
+      tasksRef.current = nextTasks;
+      setTasks(nextTasks);
+      saveCache(listsRef.current, nextTasks);
 
-      void createTaskInDb(nextOccurrenceTask).catch((err) => {
-        console.error('Erro ao salvar próxima ocorrência no Turso:', err);
-        reportDbError({
-          operation: 'Gerar Próxima Ocorrência Recorrente',
-          error: err,
-          onRetry: async () => {
-            await createTaskInDb(nextOccurrenceTask);
-          },
-        });
+      // Enfileira atomicamente a criação da próxima ocorrência e a conclusão da atual
+      enqueueMutation({ type: 'CREATE_TASK', task: nextOccurrenceTask, createdAt: now });
+      enqueueMutation({
+        type: 'UPDATE_TASK',
+        taskId: task.id,
+        updates: {
+          status: 'completed',
+          completedAt: now,
+        },
+        updatedAt: now,
       });
-      void updateTaskInDb(task.id, {
-        status: 'completed',
-        completedAt: now,
-      }).catch((err) => {
-        console.error('Erro ao concluir tarefa recorrente no Turso:', err);
-        reportDbError({
-          operation: 'Concluir Tarefa Recorrente',
-          error: err,
-          onRetry: async () => {
-            await updateTaskInDb(task.id, {
-              status: 'completed',
-              completedAt: now,
-            });
-          },
-        });
-      });
+      void triggerSync();
       return;
     }
 
     const completedAt = nextStatus === 'completed' ? now : null;
 
-    setTasks((prev) =>
-      prev.map((item) =>
-        item.id === task.id
-          ? {
-              ...item,
-              status: nextStatus,
-              completedAt,
-              updatedAt: now,
-            }
-          : item
-      )
-    );
+    if (nextStatus === 'completed') {
+      void NotificationService.cancelTaskReminders(task.id);
+    } else {
+      void NotificationService.scheduleTaskReminders({ ...task, status: 'pending' });
+    }
 
-    void updateTaskInDb(task.id, {
-      status: nextStatus,
-      completedAt,
-    }).catch((err) => {
-      console.error('Erro ao atualizar status no Turso Cloud:', err);
-      reportDbError({
-        operation: `Atualizar Status da Tarefa para "${nextStatus}"`,
-        error: err,
-        onRetry: async () => {
-          await updateTaskInDb(task.id, {
+    const nextTasks = tasksRef.current.map((item) =>
+      item.id === task.id
+        ? {
+            ...item,
             status: nextStatus,
             completedAt,
-          });
-        },
-      });
+            updatedAt: now,
+          }
+        : item
+    );
+    tasksRef.current = nextTasks;
+    setTasks(nextTasks);
+    saveCache(listsRef.current, nextTasks);
+
+    enqueueMutation({
+      type: 'UPDATE_TASK',
+      taskId: task.id,
+      updates: {
+        status: nextStatus,
+        completedAt,
+      },
+      updatedAt: now,
     });
+    void triggerSync();
 
     // Se estava na visualização do Inbox e concluiu a última tarefa pendente do Inbox, redireciona para Hoje
     if (activeView === 'inbox' && nextStatus === 'completed' && task.listId === 'inbox') {
@@ -923,35 +908,33 @@ export const TaskManagerApp: React.FC = () => {
         | 'description'
         | 'listId'
         | 'priority'
-        | 'tags'
         | 'dueDate'
         | 'recurrenceRule'
         | 'recurrenceMode'
-        | 'isPinned'
+        | 'reminders'
       >
     >
   ): Promise<void> => {
-    setTasks((prev) =>
-      prev.map((item) =>
-        item.id === taskId
-          ? { ...item, ...updates, updatedAt: Date.now() }
-          : item
-      )
-    );
+    const now = Date.now();
+    const nextTasks = tasksRef.current.map((item) => {
+      if (item.id === taskId) {
+        const updated = { ...item, ...updates, updatedAt: now };
+        void NotificationService.scheduleTaskReminders(updated);
+        return updated;
+      }
+      return item;
+    });
+    tasksRef.current = nextTasks;
+    setTasks(nextTasks);
+    saveCache(listsRef.current, nextTasks);
 
-    try {
-      await updateTaskInDb(taskId, updates, updates.tags);
-    } catch (err) {
-      console.error('Erro ao atualizar tarefa no Turso Cloud:', err);
-      reportDbError({
-        operation: 'Atualizar Propriedades da Tarefa',
-        error: err,
-        onRetry: async () => {
-          await updateTaskInDb(taskId, updates, updates.tags);
-        },
-      });
-      throw err;
-    }
+    enqueueMutation({
+      type: 'UPDATE_TASK',
+      taskId,
+      updates,
+      updatedAt: now,
+    });
+    void triggerSync();
   };
 
   // Aplicar Triagem Rápida da Inbox
@@ -962,15 +945,16 @@ export const TaskManagerApp: React.FC = () => {
         UITask,
         | 'listId'
         | 'priority'
-        | 'tags'
         | 'dueDate'
         | 'recurrenceRule'
         | 'recurrenceMode'
+        | 'reminders'
       >
     >
   ) => {
     void NativeBridge.hapticSwipeAction();
     handleUpdateTask(taskId, updates);
+    setTriageTask((prev) => (prev && prev.id === taskId ? { ...prev, ...updates } : prev));
 
     // Se moveu a última tarefa pendente da Inbox para outra lista, redireciona para Hoje
     if (
@@ -996,8 +980,9 @@ export const TaskManagerApp: React.FC = () => {
   const handleAddSubtask = (parentTask: UITask, title: string) => {
     const clean = title.trim();
     if (!clean) return;
+    const now = Date.now();
     const sub: UITask = {
-      id: `sub-${Date.now()}`,
+      id: `sub-${now}`,
       title: clean,
       description: '',
       status: 'pending',
@@ -1008,59 +993,24 @@ export const TaskManagerApp: React.FC = () => {
       recurrenceMode: 'fixed',
       listId: parentTask.listId,
       parentTaskId: parentTask.id,
-      tags: [],
       sortOrder: tasks.length + 1,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+      createdAt: now,
+      updatedAt: now,
       completedAt: null,
     };
     setTasks((prev) => [...prev, sub]);
     void NativeBridge.hapticLightImpact();
-    void createTaskInDb(sub).catch((err) => {
-      console.error('Erro ao salvar subtarefa no Turso Cloud:', err);
-      reportDbError({
-        operation: `Criar Subtarefa "${sub.title}"`,
-        error: err,
-        onRetry: async () => {
-          await createTaskInDb(sub);
-        },
-      });
-    });
+    enqueueMutation({ type: 'CREATE_TASK', task: sub, createdAt: now });
+    void triggerSync();
   };
 
   const handleManualSync = async () => {
-    setSyncState('syncing');
-    void NativeBridge.hapticLightImpact();
-    try {
-      const res = await syncEmbeddedReplica();
-      if (res.offline) {
-        setSyncState('offline');
-        reportDbError({
-          operation: 'Sincronização',
-          error: new Error('Não foi possível conectar ao banco de dados.'),
-          customTitle: 'Falha na Sincronização',
-          customMessage:
-            'O banco de dados remoto não respondeu. Verifique sua conexão com a internet.',
-          onRetry: handleManualSync,
-        });
-      } else {
-        setSyncState('synced');
-        void NativeBridge.hapticSwipeAction();
-      }
-    } catch (err) {
-      setSyncState('offline');
-      reportDbError({
-        operation: 'Sincronização',
-        error: err,
-        customTitle: 'Erro ao Sincronizar',
-        onRetry: handleManualSync,
-      });
-    }
+    await triggerSync(true);
   };
 
   const activeViewTitle = useMemo(() => {
     if (activeView === 'today') return 'Hoje';
-    if (activeView === 'next_7_days') return 'Próximos 7 Dias';
+    if (activeView === 'next_days' || activeView === 'next_7_days') return 'Próximos Dias';
     if (activeView === 'calendar') return 'Calendário & Eventos';
     if (activeView === 'projects') return 'Lista de Projetos GTD';
     if (activeView === 'completed') return 'Concluídas';
@@ -1078,7 +1028,7 @@ export const TaskManagerApp: React.FC = () => {
   return (
     <div
       onContextMenu={(e) => e.preventDefault()}
-      className="flex h-full w-full overflow-hidden bg-zinc-950 text-zinc-100 select-none"
+      className="relative flex h-full w-full overflow-hidden bg-zinc-950 text-zinc-100 select-none"
     >
       {/* Sidebar Retrátil Desktop */}
       <Sidebar
@@ -1088,6 +1038,7 @@ export const TaskManagerApp: React.FC = () => {
         onSelectView={handleSelectView}
         lists={lists}
         syncState={syncState}
+        pendingCount={pendingCount}
         onSync={() => void handleManualSync()}
         onCreateProject={() => setIsNewProjectModalOpen(true)}
         getTaskCountForView={getTaskCountForView}
@@ -1101,6 +1052,7 @@ export const TaskManagerApp: React.FC = () => {
         onSelectView={handleSelectView}
         lists={lists}
         syncState={syncState}
+        pendingCount={pendingCount}
         onSync={() => void handleManualSync()}
         onCreateProject={() => setIsNewProjectModalOpen(true)}
         getTaskCountForView={getTaskCountForView}
@@ -1117,7 +1069,11 @@ export const TaskManagerApp: React.FC = () => {
             <div className="flex items-center gap-2 min-w-0">
               <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
               <span className="truncate">
-                <strong>Modo Offline:</strong> Falha de conexão com o banco. As alterações podem não estar sincronizadas.
+                <strong>Modo Offline (Local-First):</strong>{' '}
+                {pendingCount > 0
+                  ? `${pendingCount} alteração(ões) salva(s) localmente.`
+                  : 'Você pode visualizar e concluir tarefas normalmente.'}{' '}
+                Sincronização automática assim que reconectar.
               </span>
             </div>
             <span className="text-[11px] font-semibold underline shrink-0 hover:text-amber-200">
@@ -1174,15 +1130,12 @@ export const TaskManagerApp: React.FC = () => {
               selectedTaskId={selectedTaskId}
               onSelectTask={(t) => setSelectedTaskId(t.id)}
               onToggleStatus={handleToggleStatus}
-              onOpenTriage={(t) => setTriageTask(t)}
               onDeleteTask={(t) => setTaskToDelete(t as UITask)}
-              onCreateTaskOnDate={handleCreateTaskFromCalendar}
             />
           ) : activeView === 'projects' ? (
             <ProjectsHub
               projectStats={projectStats}
               onSelectView={handleSelectView}
-              onAddAction={(name) => setQuickInput(`~"${name}" `)}
               onDeleteProject={(p) => {
                 const target = lists.find((l) => l.id === p.id);
                 if (target) setProjectToDelete(target);
@@ -1193,13 +1146,13 @@ export const TaskManagerApp: React.FC = () => {
             <TaskList
               activeView={activeView}
               pendingTasks={pendingRootTasks}
+              futureTasks={futureRootTasks}
               completedTasks={completedRootTasks}
               allTasks={tasks}
               listMap={listMap}
               selectedTaskId={selectedTaskId}
               onSelectTask={(t) => setSelectedTaskId(t.id)}
               onToggleStatus={handleToggleStatus}
-              onOpenTriage={(t) => setTriageTask(t)}
               onDeleteTask={(t) => setTaskToDelete(t)}
               onGoToToday={() => handleSelectView('today')}
               todayCount={getTaskCountForView('today')}
@@ -1256,7 +1209,7 @@ export const TaskManagerApp: React.FC = () => {
         icon={<Trash2 className="w-5 h-5" />}
         title="Excluir Projeto GTD?"
         subtitle={projectToDelete?.name}
-        description="O projeto será removido. Todas as tarefas pertencentes a ele serão mantidas com segurança e movidas para a sua Inbox."
+        description="O projeto e todas as tarefas vinculadas a ele serão excluídos permanentemente."
         confirmLabel="Excluir Projeto"
         confirmClass="bg-red-600 hover:bg-red-500"
       />

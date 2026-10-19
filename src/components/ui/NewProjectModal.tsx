@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { X } from 'lucide-react';
 import { NativeBridge } from '../../lib/native';
 import { SheetHandle } from '../atoms/SheetHandle';
@@ -27,6 +27,16 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 }) => {
   const [name, setName] = useState('');
   const [color, setColor] = useState(PROJECT_PRESET_COLORS[0] ?? '#6366f1');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      const timer = setTimeout(() => {
+        inputRef.current?.focus();
+      }, 60);
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -39,14 +49,25 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
     setColor(PROJECT_PRESET_COLORS[0] ?? '#6366f1');
   };
 
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    const target = e.target;
+    setTimeout(() => {
+      target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 150);
+  };
+
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/75 backdrop-blur-xs p-0 md:p-4"
+      className="absolute inset-0 z-50 flex items-end md:items-center justify-center bg-black/75 backdrop-blur-xs p-0 md:p-4"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md bg-zinc-900 border-t md:border border-zinc-800 rounded-t-3xl md:rounded-2xl p-5 space-y-4 shadow-2xl"
+        style={{
+          paddingBottom:
+            'max(1.25rem, calc(var(--safe-bottom, 0px) - var(--keyboard-height, 0px)))',
+        }}
+        className="w-full max-w-md max-h-full overflow-y-auto native-scroll-container bg-zinc-900 border-t md:border border-zinc-800 rounded-t-3xl md:rounded-2xl p-5 md:pb-5 space-y-4 shadow-2xl"
       >
         <SheetHandle />
 
@@ -79,13 +100,15 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
               Nome do Projeto / Resultado Desejado
             </label>
             <input
+              ref={inputRef}
               type="text"
               autoFocus
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
+              onFocus={handleInputFocus}
               placeholder="ex: Reforma do Escritório, Lançamento v2..."
-              className="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
+              className="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3 py-2 text-base sm:text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
             />
           </div>
 

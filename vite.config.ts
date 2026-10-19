@@ -4,7 +4,13 @@ import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 import path from 'path';
 
+const repoName = process.env.GITHUB_REPOSITORY?.split('/')[1];
+const isUserPages = repoName?.endsWith('.github.io');
+const defaultBase = process.env.GITHUB_ACTIONS && repoName && !isUserPages ? `/${repoName}/` : '/';
+const base = process.env.BASE_PATH ?? defaultBase;
+
 export default defineConfig({
+  base,
   plugins: [
     react(),
     tailwindcss(),

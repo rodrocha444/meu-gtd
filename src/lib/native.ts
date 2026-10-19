@@ -132,15 +132,21 @@ export const NativeBridge = {
         const isInputFocused =
           activeTag === 'INPUT' ||
           activeTag === 'TEXTAREA' ||
-          (document.activeElement as HTMLElement)?.isContentEditable;
+          Boolean((document.activeElement as HTMLElement)?.isContentEditable);
         const diff = Math.max(0, window.innerHeight - vv.height);
-        const isKeyboardOpen = Boolean(isInputFocused && diff > 150);
+        // O teclado está aberto se a área do viewport foi reduzida em mais de 120px
+        // ou se um input está em foco e houve qualquer redução (>50px)
+        const isKeyboardOpen = diff > 120 || (isInputFocused && diff > 50);
 
         resetWindowScroll();
 
         document.documentElement.style.setProperty(
           '--app-height',
           `${vv.height}px`
+        );
+        document.documentElement.style.setProperty(
+          '--app-translate-y',
+          `${vv.offsetTop || 0}px`
         );
         document.documentElement.style.setProperty(
           '--keyboard-height',
@@ -167,19 +173,15 @@ export const NativeBridge = {
           setTimeout(resetWindowScroll, 30);
           setTimeout(resetWindowScroll, 100);
           setTimeout(resetWindowScroll, 250);
+          requestAnimationFrame(updateOffset);
         }
       };
 
       const handleBlur = () => {
-        document.body.classList.remove('keyboard-open');
-        document.documentElement.style.setProperty('--keyboard-height', '0px');
-        resetWindowScroll();
-        if (window.visualViewport) {
-          document.documentElement.style.setProperty(
-            '--app-height',
-            `${window.visualViewport.height}px`
-          );
-        }
+        // Aguarda a sincronização do visualViewport ou eventual troca de foco
+        setTimeout(() => {
+          updateOffset();
+        }, 100);
       };
 
       // Inicializa a altura do viewport e scroll
@@ -208,11 +210,18 @@ export const NativeBridge = {
         '--keyboard-height',
         `${info.keyboardHeight}px`
       );
+      document.documentElement.style.setProperty(
+        '--app-height',
+        `calc(100% - ${info.keyboardHeight}px)`
+      );
+      document.documentElement.style.setProperty('--app-translate-y', '0px');
     });
 
     const hideSub = await Keyboard.addListener('keyboardWillHide', () => {
       document.body.classList.remove('keyboard-open');
       document.documentElement.style.setProperty('--keyboard-height', '0px');
+      document.documentElement.style.setProperty('--app-height', '100%');
+      document.documentElement.style.setProperty('--app-translate-y', '0px');
     });
 
     return () => {

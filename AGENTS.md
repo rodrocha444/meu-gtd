@@ -63,8 +63,8 @@ src/components/
 
 | Camada | O que é | Exemplos |
 |---|---|---|
-| **Atom** | Elemento UI indivisível, sem lógica de negócio. Aceita apenas props primitivas. | `Checkbox`, `Badge`, `Icon`, `PriorityDot`, `Tag`, `Button`, `Avatar` |
-| **Molecule** | Composição de átomos com lógica de apresentação simples. | `TaskRow`, `TagChip`, `DateBadge`, `SwipeableRow`, `EmptyState` |
+| **Atom** | Elemento UI indivisível, sem lógica de negócio. Aceita apenas props primitivas. | `Checkbox`, `Badge`, `Icon`, `PriorityDot`, `Button`, `Avatar` |
+| **Molecule** | Composição de átomos com lógica de apresentação simples. | `TaskRow`, `DateBadge`, `SwipeableRow`, `EmptyState` |
 | **Organism** | Seção autônoma com acesso a estado/contexto e lógica de negócio. | `TaskList`, `QuickCaptureBar`, `Sidebar`, `CalendarGrid`, `TaskDetailSheet` |
 | **Template** | Esqueleto de página (layout puro, sem dados). | `AppShell`, `MobileLayout`, `DesktopLayout` |
 | **UI (global)** | Controles de formulário customizados reutilizáveis em qualquer camada. | `CustomSelect`, `CustomDatePicker`, `CustomRecurrencePicker`, `BottomSheet` |
@@ -89,8 +89,6 @@ src/components/
   - `priority`: `0` (Nenhuma), `1` (Baixa), `2` (Média), `3` (Alta).
   - `parent_task_id`: Self-reference para subtarefas/checklists.
   - `is_pinned`, `due_date`, `recurrence_rule` (RRule RFC 5545), `recurrence_mode` (`'fixed' | 'after_completion'`), `list_id`, `completed_at`.
-- **`tags`**: `id`, `name` (ex: `@computador`, `@rua`, `#energia_baixa`), `color`.
-- **`task_tags`**: N:N (`task_id`, `tag_id`).
 
 ---
 
@@ -98,7 +96,6 @@ src/components/
 
 ### 5.1. Quick Capture & NLP Parser (`src/utils/nlpParser.ts`)
 - **Prioridade:** `!1`, `!2`, `!3`, `!baixa`, `!media`, `!alta`, `!urgente`.
-- **Tags & Contextos GTD:** `@contexto` (ferramenta/local) e `#tag` (energia/tópico).
 - **Lista:** `~lista` ou `~"Nome da Lista"` (default: `inbox`).
 - **Datas (PT-BR):** `hoje`, `amanhã`, `depois de amanhã`, `próxima semana`, dias da semana (`segunda`..`domingo`), offsets (`+3d`) e `dd/mm`. Extrai e remove da string do título.
 - **Recorrência (PT-BR):** `todo dia`, `toda semana`, `todo mês`, `todo ano` / `anual`, `a cada N dias|semanas|meses|anos`, e modificador `após concluir`.
@@ -106,9 +103,9 @@ src/components/
 ### 5.2. Smart Views GTD & Calendário
 - **Inbox:** Entrada não-processada.
 - **Hoje:** Vencimento `<= hoje 23:59`.
-- **Próximos 7 Dias:** Vencimento nos próximos 7 dias.
+- **Próximos Dias:** Vencimento nos dias seguintes (`> hoje 23:59`, excluindo o dia atual).
 - **Calendário (`calendar`):** Visualização em grade Mensal ou Semanal com tarefas agendadas, eventos/aniversários e projeção de ocorrências recorrentes.
-- **Ações Seguintes (Next Actions):** Tarefas acionáveis imediatas sem data rígida.
+- **Ações Seguintes (Next Actions):** Lista especial focada em execução. Por padrão, exibe apenas tarefas imediatas (sem data ou com vencimento em até 10 dias). Tarefas com vencimento superior a 10 dias são agrupadas em uma seção interna contraída por padrão chamada **Ações Futuras**.
 - **Aguardando (Waiting For):** Bloqueadas por terceiros / delegação.
 - **Algum Dia (Someday/Maybe):** Ideias futuras sem compromisso ativo.
 - **Concluídas (`completed`):** Lista separada e histórico centralizado de tarefas concluídas, além de agrupamento em seção retrátil "Concluídas (N)" nas listas ativas.
@@ -126,7 +123,7 @@ src/components/
   - `0 (Nenhuma)`: Cinza.
 - **Gestos de Swipe (Mobile):**
   - *Direita:* Concluir tarefa (com Haptics).
-  - *Esquerda:* Abrir modal/sheet de Triagem GTD (mover lista, vincular contexto `@tag`, alterar prioridade, data e recorrência).
+  - *Esquerda:* Abrir modal/sheet de Triagem GTD (mover lista, alterar prioridade, data e recorrência).
 
 ---
 

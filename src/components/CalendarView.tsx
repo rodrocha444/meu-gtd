@@ -1,13 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import type { RecurrenceMode, TaskPriority, TaskStatus } from '../db/schema';
+import type { TaskReminder } from '../types/task';
 import { NativeBridge } from '../lib/native';
 import {
   getTaskOccurrenceOnDay,
   isSameCalendarDay,
   normalizeToNineAM,
 } from '../utils/recurrence';
-import { CustomSegmentedControl } from './ui/CustomControls';
 import { CalendarGrid } from './organisms/CalendarGrid';
 import { CalendarDayPanel } from './organisms/CalendarDayPanel';
 
@@ -21,9 +21,9 @@ export interface CalendarTaskItem {
   dueDate: number | null;
   recurrenceRule: string | null;
   recurrenceMode: RecurrenceMode;
+  reminders?: TaskReminder[];
   listId: string;
   parentTaskId: string | null;
-  tags: string[];
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
@@ -36,19 +36,8 @@ interface CalendarViewProps {
   selectedTaskId: string | null;
   onSelectTask: (task: CalendarTaskItem) => void;
   onToggleStatus: (task: CalendarTaskItem, targetStatus?: TaskStatus) => void;
-  onOpenTriage: (task: CalendarTaskItem) => void;
   onDeleteTask?: (task: CalendarTaskItem) => void;
-  onCreateTaskOnDate: (params: {
-    title: string;
-    dueDate: number;
-    recurrenceRule: string | null;
-    recurrenceMode: RecurrenceMode;
-    tags: string[];
-    priority: TaskPriority;
-  }) => void;
 }
-
-type CalendarGridMode = 'month' | 'week';
 
 const MONTH_NAMES_PT = [
   'Janeiro',
@@ -71,12 +60,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   selectedTaskId,
   onSelectTask,
   onToggleStatus,
-  onOpenTriage,
   onDeleteTask,
-  onCreateTaskOnDate,
 }) => {
   const today = useMemo(() => normalizeToNineAM(new Date()), []);
-  const [gridMode, setGridMode] = useState<CalendarGridMode>('month');
   const [selectedDay, setSelectedDay] = useState<Date>(today);
   const [cursorDate, setCursorDate] = useState<Date>(
     () => new Date(today.getFullYear(), today.getMonth(), 1)
@@ -87,24 +73,8 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     [tasks]
   );
 
-  // Gera as células de dias conforme o modo (Mês ou Semana)
+  // Gera as células de dias do mês corrente
   const calendarCells = useMemo(() => {
-    if (gridMode === 'week') {
-      const startOfWeek = new Date(cursorDate);
-      const dayOfWeek = startOfWeek.getDay();
-      startOfWeek.setDate(startOfWeek.getDate() - dayOfWeek);
-      startOfWeek.setHours(9, 0, 0, 0);
-
-      return Array.from({ length: 7 }, (_, i) => {
-        const d = new Date(startOfWeek);
-        d.setDate(startOfWeek.getDate() + i);
-        return {
-          date: d,
-          inCurrentMonth: d.getMonth() === cursorDate.getMonth(),
-        };
-      });
-    }
-
     const year = cursorDate.getFullYear();
     const month = cursorDate.getMonth();
     const firstWeekday = new Date(year, month, 1).getDay();
@@ -135,7 +105,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     }
 
     return cells;
-  }, [cursorDate, gridMode]);
+  }, [cursorDate]);
 
   // Mapeia as tarefas/ocorrências para cada célula
   const occurrencesByDateKey = useMemo(() => {
@@ -159,7 +129,13 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         if ((a.task.status === 'pending') !== (b.task.status === 'pending')) {
           return a.task.status === 'pending' ? -1 : 1;
         }
-        return b.task.priority - a.task.priority;
+        if (a.task.priority !== b.task.priority) {
+          return b.task.priority - a.task.priority;
+        }
+        if (a.task.dueDate !== null && b.task.dueDate !== null && a.task.dueDate !== b.task.dueDate) {
+          return a.task.dueDate - b.task.dueDate;
+        }
+        return a.task.sortOrder - b.task.sortOrder;
       });
 
       map.set(key, dayItems);
@@ -180,50 +156,49 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         list.push({ task: t, isProjected: occ.isProjected });
       }
     }
+    list.sort((a, b) => {
+      if ((a.task.status === 'pending') !== (b.task.status === 'pending')) {
+        return a.task.status === 'pending' ? -1 : 1;
+      }
+      if (a.task.priority !== b.task.priority) {
+        return b.task.priority - a.task.priority;
+      }
+      if (a.task.dueDate !== null && b.task.dueDate !== null && a.task.dueDate !== b.task.dueDate) {
+        return a.task.dueDate - b.task.dueDate;
+      }
+      return a.task.sortOrder - b.task.sortOrder;
+    });
     return list;
   }, [occurrencesByDateKey, rootTasks, selectedDay, selectedDayKey]);
 
   const handleNavigate = (direction: -1 | 1) => {
     void NativeBridge.hapticLightImpact();
-    if (gridMode === 'week') {
-      const next = new Date(cursorDate);
-      next.setDate(next.getDate() + direction * 7);
-      setCursorDate(next);
-      setSelectedDay(next);
-    } else {
-      const next = new Date(
-        cursorDate.getFullYear(),
-        cursorDate.getMonth() + direction,
-        1,
-        9,
-        0,
-        0,
-        0
-      );
-      setCursorDate(next);
-    }
+    const next = new Date(
+      cursorDate.getFullYear(),
+      cursorDate.getMonth() + direction,
+      1,
+      9,
+      0,
+      0,
+      0
+    );
+    setCursorDate(next);
   };
 
-  const handleGoToToday = () => {
+  const isCurrentMonth =
+    cursorDate.getFullYear() === today.getFullYear() &&
+    cursorDate.getMonth() === today.getMonth();
+
+  const handleGoToCurrentMonth = () => {
     void NativeBridge.hapticLightImpact();
     const now = normalizeToNineAM(new Date());
     setSelectedDay(now);
-    setCursorDate(new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 0, 0, 0));
+    setCursorDate(new Date(now.getFullYear(), now.getMonth(), 1, 9, 0, 0, 0));
   };
 
   const headerPeriodLabel = useMemo(() => {
-    if (gridMode === 'week' && calendarCells.length === 7) {
-      const first = calendarCells[0]!.date;
-      const last = calendarCells[6]!.date;
-      if (first.getMonth() === last.getMonth()) {
-        return `${first.getDate()} – ${last.getDate()} de ${
-          MONTH_NAMES_PT[first.getMonth()]
-        } ${first.getFullYear()}`;
-      }
-      return `${first.getDate()} ${MONTH_NAMES_PT[first.getMonth()]?.slice(0, 3)} – ${last.getDate()} ${MONTH_NAMES_PT[last.getMonth()]?.slice(0, 3)}`;
-    }
     return `${MONTH_NAMES_PT[cursorDate.getMonth()]} ${cursorDate.getFullYear()}`;
-  }, [calendarCells, cursorDate, gridMode]);
+  }, [cursorDate]);
 
   const formattedSelectedDayTitle = useMemo(() => {
     if (isSameCalendarDay(selectedDay, today)) {
@@ -244,57 +219,40 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   return (
     <div className="space-y-4">
       {/* Barra de Controles do Calendário */}
-      <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800/90">
-        <div className="flex items-center gap-2">
-          <div className="flex items-center rounded-xl bg-zinc-950 border border-zinc-800 p-0.5">
-            <button
-              type="button"
-              aria-label="Período anterior"
-              onClick={() => handleNavigate(-1)}
-              className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={handleGoToToday}
-              className="px-2.5 py-1 text-xs font-semibold text-zinc-200 hover:text-indigo-300 transition-colors"
-            >
-              Hoje
-            </button>
-            <button
-              type="button"
-              aria-label="Próximo período"
-              onClick={() => handleNavigate(1)}
-              className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
+      <div className="flex flex-col items-center justify-center p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800/90">
+        <div className="flex items-center gap-1.5 sm:gap-2">
+          <button
+            type="button"
+            aria-label="Mês anterior"
+            onClick={() => handleNavigate(-1)}
+            className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/80 active:scale-95 transition-all"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
 
-          <h2 className="text-sm sm:text-base font-bold text-zinc-100 tracking-tight">
+          <h2 className="text-sm sm:text-base font-bold text-zinc-100 tracking-tight px-1 select-none text-center">
             {headerPeriodLabel}
           </h2>
+
+          <button
+            type="button"
+            aria-label="Próximo mês"
+            onClick={() => handleNavigate(1)}
+            className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/80 active:scale-95 transition-all"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
         </div>
 
-        <CustomSegmentedControl<CalendarGridMode>
-          size="sm"
-          value={gridMode}
-          onChange={(mode) => {
-            setGridMode(mode);
-            if (mode === 'week') {
-              setCursorDate(new Date(selectedDay));
-            } else {
-              setCursorDate(
-                new Date(selectedDay.getFullYear(), selectedDay.getMonth(), 1)
-              );
-            }
-          }}
-          options={[
-            { value: 'month', label: 'Mês' },
-            { value: 'week', label: 'Semana' },
-          ]}
-        />
+        {!isCurrentMonth && (
+          <button
+            type="button"
+            onClick={handleGoToCurrentMonth}
+            className="mt-1.5 px-2.5 py-0.5 text-[11px] font-medium rounded-full text-zinc-300 hover:text-zinc-100 bg-zinc-950/80 hover:bg-zinc-800/80 border border-zinc-800/80 active:scale-95 transition-all"
+          >
+            Mês atual
+          </button>
+        )}
       </div>
 
       {/* Grade do Calendário */}
@@ -303,7 +261,6 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         occurrencesByDateKey={occurrencesByDateKey}
         selectedDay={selectedDay}
         today={today}
-        gridMode={gridMode}
         onSelectDay={(d) => setSelectedDay(d)}
       />
 
@@ -316,9 +273,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         selectedTaskId={selectedTaskId}
         onSelectTask={onSelectTask}
         onToggleStatus={onToggleStatus}
-        onOpenTriage={onOpenTriage}
         onDeleteTask={onDeleteTask}
-        onCreateTaskOnDate={onCreateTaskOnDate}
       />
     </div>
   );

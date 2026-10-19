@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Bell,
   Calendar as CalendarIcon,
   Check,
   ChevronDown,
@@ -9,11 +10,15 @@ import {
   Minus,
   Plus,
   Repeat,
-  Sparkles,
   X,
 } from 'lucide-react';
 import type { RecurrenceMode } from '../../db/schema';
+import type { TaskReminder } from '../../types/task';
 import { NativeBridge } from '../../lib/native';
+import {
+  createDefaultReminder,
+  formatReminderShortLabel,
+} from '../../utils/reminder';
 import {
   buildRRule,
   formatRecurrenceBadge,
@@ -570,11 +575,7 @@ const FREQUENCY_OPTIONS: CustomSelectOption<RecurrenceFrequency>[] = [
   { value: 'DAILY', label: 'Dias', description: 'Repetição diária ou a cada N dias' },
   { value: 'WEEKLY', label: 'Semanas', description: 'Repetição semanal' },
   { value: 'MONTHLY', label: 'Meses', description: 'Repetição mensal no mesmo dia' },
-  {
-    value: 'YEARLY',
-    label: 'Anos',
-    description: 'Ideal para aniversários e eventos anuais',
-  },
+  { value: 'YEARLY', label: 'Anos', description: 'Repetição anual no mesmo dia' },
 ];
 
 export const CustomRecurrencePicker: React.FC<CustomRecurrencePickerProps> = ({
@@ -624,7 +625,7 @@ export const CustomRecurrencePicker: React.FC<CustomRecurrencePickerProps> = ({
           { id: 'DAILY' as const, label: 'Diária' },
           { id: 'WEEKLY' as const, label: 'Semanal' },
           { id: 'MONTHLY' as const, label: 'Mensal' },
-          { id: 'YEARLY' as const, label: 'Anual (Aniversário)' },
+          { id: 'YEARLY' as const, label: 'Anual' },
           { id: 'CUSTOM' as const, label: 'Personalizar...' },
         ].map((item) => {
           const isActive =
@@ -642,8 +643,7 @@ export const CustomRecurrencePicker: React.FC<CustomRecurrencePickerProps> = ({
                   : 'bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
               }`}
             >
-              {item.id === 'YEARLY' && <Sparkles className="w-3 h-3 text-pink-400" />}
-              {item.id !== 'NONE' && item.id !== 'YEARLY' && (
+              {item.id !== 'NONE' && (
                 <Repeat className="w-3 h-3 text-indigo-400" />
               )}
               <span>{item.label}</span>
@@ -725,6 +725,346 @@ export const CustomRecurrencePicker: React.FC<CustomRecurrencePickerProps> = ({
               ? 'Mantém o calendário fixo (ex: aniversários, contas, eventos). A próxima data é calculada a partir do dia agendado.'
               : 'Calcula o próximo ciclo a partir do dia exato em que você concluir a tarefa (ex: cortar cabelo, manutenção, revisão).'}
           </p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ============================================================================
+   6. CUSTOM TIME PICKER (Substituto nativo-dark para <input type="time">)
+   ============================================================================ */
+
+export interface CustomTimePickerProps {
+  value: string; // "HH:mm" (padrão "09:00")
+  onChange: (time: string) => void;
+  onClose?: () => void;
+}
+
+export const CustomTimePicker: React.FC<CustomTimePickerProps> = ({
+  value = '09:00',
+  onChange,
+  onClose,
+}) => {
+  const [rawH, rawM] = (value || '09:00').split(':');
+  const initialH = Math.max(0, Math.min(23, Number(rawH) || 9));
+  const initialM = Math.max(0, Math.min(59, Number(rawM) || 0));
+
+  const [hours, setHours] = useState(initialH);
+  const [minutes, setMinutes] = useState(initialM);
+
+  const quickTimes = ['08:00', '09:00', '12:00', '14:00', '18:00', '20:00'];
+
+  const applyTime = (h: number, m: number) => {
+    const formatted = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    onChange(formatted);
+  };
+
+  const handleStepHours = (delta: number) => {
+    void NativeBridge.hapticLightImpact();
+    const next = (hours + delta + 24) % 24;
+    setHours(next);
+    applyTime(next, minutes);
+  };
+
+  const handleStepMinutes = (delta: number) => {
+    void NativeBridge.hapticLightImpact();
+    const next = (minutes + delta + 60) % 60;
+    setMinutes(next);
+    applyTime(hours, next);
+  };
+
+  return (
+    <div className="p-3 rounded-2xl bg-zinc-950/95 border border-zinc-800 space-y-3 shadow-xl backdrop-blur-md">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-bold text-zinc-200 flex items-center gap-1.5">
+          <Clock className="w-3.5 h-3.5 text-indigo-400" />
+          Horário do Lembrete
+        </span>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+
+      {/* Steppers de Hora e Minuto */}
+      <div className="flex items-center justify-center gap-3 py-1">
+        {/* Horas */}
+        <div className="flex flex-col items-center gap-1">
+          <button
+            type="button"
+            aria-label="Aumentar hora"
+            onClick={() => handleStepHours(1)}
+            className="w-8 h-7 rounded-lg flex items-center justify-center text-zinc-300 hover:bg-zinc-800 bg-zinc-900 border border-zinc-800 transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
+          <span className="w-12 text-center text-base font-bold text-zinc-100 tabular-nums py-1">
+            {String(hours).padStart(2, '0')}h
+          </span>
+          <button
+            type="button"
+            aria-label="Diminuir hora"
+            onClick={() => handleStepHours(-1)}
+            className="w-8 h-7 rounded-lg flex items-center justify-center text-zinc-300 hover:bg-zinc-800 bg-zinc-900 border border-zinc-800 transition-colors"
+          >
+            <Minus className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <span className="text-xl font-bold text-zinc-500 pb-1">:</span>
+
+        {/* Minutos (passo de 5 min) */}
+        <div className="flex flex-col items-center gap-1">
+          <button
+            type="button"
+            aria-label="Aumentar minutos"
+            onClick={() => handleStepMinutes(5)}
+            className="w-8 h-7 rounded-lg flex items-center justify-center text-zinc-300 hover:bg-zinc-800 bg-zinc-900 border border-zinc-800 transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
+          <span className="w-12 text-center text-base font-bold text-zinc-100 tabular-nums py-1">
+            {String(minutes).padStart(2, '0')}m
+          </span>
+          <button
+            type="button"
+            aria-label="Diminuir minutos"
+            onClick={() => handleStepMinutes(-5)}
+            className="w-8 h-7 rounded-lg flex items-center justify-center text-zinc-300 hover:bg-zinc-800 bg-zinc-900 border border-zinc-800 transition-colors"
+          >
+            <Minus className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Atalhos Rápidos de Horário */}
+      <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-zinc-800/80">
+        {quickTimes.map((t) => {
+          const isSelected = value === t;
+          return (
+            <button
+              key={t}
+              type="button"
+              onClick={() => {
+                void NativeBridge.hapticLightImpact();
+                const [h = 0, m = 0] = t.split(':').map(Number);
+                setHours(h);
+                setMinutes(m);
+                onChange(t);
+              }}
+              className={`px-2 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                isSelected
+                  ? 'bg-indigo-600/20 border-indigo-500/60 text-indigo-300 font-semibold'
+                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+              }`}
+            >
+              {t}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================================
+   7. CUSTOM REMINDER PICKER (Suporte a Múltiplos Lembretes e Antecedência)
+   ============================================================================ */
+
+export interface CustomReminderPickerProps {
+  dueDate: number | null;
+  reminders: TaskReminder[];
+  onChange: (reminders: TaskReminder[]) => void;
+  onSetDueDateDefault?: () => void;
+}
+
+export const CustomReminderPicker: React.FC<CustomReminderPickerProps> = ({
+  dueDate,
+  reminders = [],
+  onChange,
+  onSetDueDateDefault,
+}) => {
+  const [isAdding, setIsAdding] = useState(false);
+  const [editingReminderId, setEditingReminderId] = useState<string | null>(null);
+  const [customDays, setCustomDays] = useState(15);
+
+  const presets = [
+    { label: 'No dia', offsetDays: 0 },
+    { label: '1 dia antes', offsetDays: 1 },
+    { label: '2 dias antes', offsetDays: 2 },
+    { label: '1 semana antes', offsetDays: 7 },
+    { label: '15 dias antes', offsetDays: 15 },
+    { label: '30 dias antes', offsetDays: 30 },
+  ];
+
+  const handleAddPreset = (offsetDays: number) => {
+    void NativeBridge.hapticLightImpact();
+    const newRem = createDefaultReminder(offsetDays, '09:00');
+    onChange([...reminders, newRem]);
+    setIsAdding(false);
+  };
+
+  const handleRemoveReminder = (id: string) => {
+    void NativeBridge.hapticLightImpact();
+    onChange(reminders.filter((r) => r.id !== id));
+    if (editingReminderId === id) {
+      setEditingReminderId(null);
+    }
+  };
+
+  const handleUpdateTime = (id: string, newTime: string) => {
+    onChange(
+      reminders.map((r) => (r.id === id ? { ...r, time: newTime } : r))
+    );
+  };
+
+  return (
+    <div className="space-y-2.5">
+      {/* Alerta se não houver data agendada */}
+      {dueDate === null && (
+        <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-between text-xs text-amber-300">
+          <span>Defina uma data de vencimento para calcular a antecedência.</span>
+          {onSetDueDateDefault && (
+            <button
+              type="button"
+              onClick={onSetDueDateDefault}
+              className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 font-medium shrink-0 ml-2"
+            >
+              Definir data
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Lista de Lembretes Existentes */}
+      {reminders.length > 0 && (
+        <div className="space-y-1.5">
+          {reminders.map((rem) => {
+            const isEditingTime = editingReminderId === rem.id;
+            return (
+              <div key={rem.id} className="space-y-2">
+                <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-zinc-950/80 border border-zinc-800/90 text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="p-1 rounded-lg bg-amber-500/10 text-amber-400 shrink-0">
+                      <Bell className="w-3.5 h-3.5" />
+                    </span>
+                    <span className="font-medium text-zinc-200 truncate">
+                      {formatReminderShortLabel(rem)}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {/* Botão de Horário (Padrão 09:00, clicável para editar) */}
+                    <button
+                      type="button"
+                      aria-label="Editar horário do lembrete"
+                      onClick={() => {
+                        void NativeBridge.hapticLightImpact();
+                        setEditingReminderId(isEditingTime ? null : rem.id);
+                      }}
+                      className={`flex items-center gap-1 px-2 py-1 rounded-lg border font-semibold transition-colors ${
+                        isEditingTime
+                          ? 'bg-indigo-600/20 border-indigo-500 text-indigo-200'
+                          : 'bg-zinc-900 border-zinc-700/80 text-zinc-300 hover:border-zinc-600 hover:text-zinc-100'
+                      }`}
+                    >
+                      <Clock className="w-3 h-3 text-indigo-400" />
+                      <span>{rem.time || '09:00'}</span>
+                    </button>
+
+                    {/* Excluir Lembrete */}
+                    <button
+                      type="button"
+                      aria-label="Remover este lembrete"
+                      onClick={() => handleRemoveReminder(rem.id)}
+                      className="p-1 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Popover/Painel inline de ajuste de horário para este lembrete */}
+                {isEditingTime && (
+                  <CustomTimePicker
+                    value={rem.time || '09:00'}
+                    onChange={(newTime) => handleUpdateTime(rem.id, newTime)}
+                    onClose={() => setEditingReminderId(null)}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Botão Adicionar ou Painel de Seleção de Presets */}
+      {!isAdding ? (
+        <button
+          type="button"
+          onClick={() => {
+            void NativeBridge.hapticLightImpact();
+            setIsAdding(true);
+          }}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium bg-zinc-950/60 border border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700 transition-colors"
+        >
+          <Plus className="w-3.5 h-3.5 text-indigo-400" />
+          <span>{reminders.length === 0 ? 'Adicionar Lembrete' : 'Adicionar Outro Lembrete'}</span>
+        </button>
+      ) : (
+        <div className="p-3 rounded-2xl bg-zinc-950/90 border border-zinc-800 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-zinc-200">
+              Escolha a antecedência (Horário padrão: 09:00)
+            </span>
+            <button
+              type="button"
+              onClick={() => setIsAdding(false)}
+              className="p-1 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            {presets.map((p) => (
+              <button
+                key={p.offsetDays}
+                type="button"
+                onClick={() => handleAddPreset(p.offsetDays)}
+                className="px-2.5 py-1.5 rounded-xl text-xs font-medium bg-zinc-900 border border-zinc-800 text-zinc-300 hover:border-indigo-500/60 hover:text-indigo-300 hover:bg-indigo-600/10 transition-colors flex items-center gap-1"
+              >
+                <Bell className="w-3 h-3 text-amber-400" />
+                <span>{p.label}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Opção Personalizada com Stepper */}
+          <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between gap-2">
+            <span className="text-xs text-zinc-400">Personalizado (dias antes):</span>
+            <div className="flex items-center gap-2">
+              <CustomNumberStepper
+                value={customDays}
+                min={1}
+                max={365}
+                onChange={setCustomDays}
+              />
+              <button
+                type="button"
+                onClick={() => handleAddPreset(customDays)}
+                className="px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+              >
+                Adicionar
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

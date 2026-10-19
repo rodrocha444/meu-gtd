@@ -6,7 +6,6 @@ import { ProjectCard, type ProjectStat } from '../molecules/ProjectCard';
 interface ProjectsHubProps {
   projectStats: ProjectStat[];
   onSelectView: (viewId: string) => void;
-  onAddAction: (projectName: string) => void;
   onDeleteProject: (project: ProjectStat) => void;
   onCreateProject: () => void;
 }
@@ -14,7 +13,6 @@ interface ProjectsHubProps {
 export const ProjectsHub: React.FC<ProjectsHubProps> = ({
   projectStats,
   onSelectView,
-  onAddAction,
   onDeleteProject,
   onCreateProject,
 }) => {
@@ -23,7 +21,7 @@ export const ProjectsHub: React.FC<ProjectsHubProps> = ({
       <div className="flex items-center justify-between pb-1">
         <div>
           <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-400">
-            Projetos Ativos ({projectStats.length})
+            Projetos ({projectStats.length})
           </h2>
         </div>
         <button
@@ -58,7 +56,6 @@ export const ProjectsHub: React.FC<ProjectsHubProps> = ({
               key={proj.id}
               project={proj}
               onView={onSelectView}
-              onAddAction={onAddAction}
               onDelete={onDeleteProject}
             />
           ))}

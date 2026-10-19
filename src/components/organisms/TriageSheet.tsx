@@ -1,26 +1,24 @@
 import React, { useEffect, useState } from 'react';
 import {
   AlignLeft,
+  Bell,
   Check,
   FolderPlus,
-  Tag,
   Trash2,
   X,
 } from 'lucide-react';
 import type { RecurrenceMode, TaskPriority } from '../../db/schema';
 import { NativeBridge } from '../../lib/native';
-import {
-  getPriorityMeta,
-  GTD_CONTEXT_SUGGESTIONS,
-} from '../../constants/priority';
+import { getPriorityMeta } from '../../constants/priority';
 import { SheetHandle } from '../atoms/SheetHandle';
 import {
   CustomDatePicker,
   CustomRecurrencePicker,
+  CustomReminderPicker,
   CustomSelect,
   type CustomSelectOption,
 } from '../ui/CustomControls';
-import type { UITask } from '../../types/task';
+import type { UITask, TaskReminder } from '../../types/task';
 
 interface TriageSheetProps {
   triageTask: UITask | null;
@@ -33,10 +31,10 @@ interface TriageSheetProps {
         UITask,
         | 'listId'
         | 'priority'
-        | 'tags'
         | 'dueDate'
         | 'recurrenceRule'
         | 'recurrenceMode'
+        | 'reminders'
       >
     >
   ) => void;
@@ -53,13 +51,12 @@ export const TriageSheet: React.FC<TriageSheetProps> = ({
   onPromoteToProject,
   onDeleteTask,
 }) => {
-  // Rascunho local de triagem — nada é salvo no banco até o usuário clicar em "Salvar Triagem"
   const [draftListId, setDraftListId] = useState(triageTask?.listId ?? 'inbox');
   const [draftDueDate, setDraftDueDate] = useState<number | null>(triageTask?.dueDate ?? null);
   const [draftRecurrenceRule, setDraftRecurrenceRule] = useState<string | null>(triageTask?.recurrenceRule ?? null);
   const [draftRecurrenceMode, setDraftRecurrenceMode] = useState<RecurrenceMode>(triageTask?.recurrenceMode ?? 'fixed');
   const [draftPriority, setDraftPriority] = useState<TaskPriority>(triageTask?.priority ?? 0);
-  const [draftTags, setDraftTags] = useState<string[]>(triageTask ? [...triageTask.tags] : []);
+  const [draftReminders, setDraftReminders] = useState<TaskReminder[]>(triageTask?.reminders ?? []);
 
   useEffect(() => {
     if (triageTask) {
@@ -68,49 +65,57 @@ export const TriageSheet: React.FC<TriageSheetProps> = ({
       setDraftRecurrenceRule(triageTask.recurrenceRule);
       setDraftRecurrenceMode(triageTask.recurrenceMode);
       setDraftPriority(triageTask.priority);
-      setDraftTags([...triageTask.tags]);
+      setDraftReminders(triageTask.reminders ?? []);
     }
   }, [triageTask?.id]);
 
   if (!triageTask) return null;
 
-  const handleSaveTriage = () => {
-    void NativeBridge.hapticSwipeAction();
-    onApplyTriage(triageTask.id, {
-      listId: draftListId,
-      dueDate: draftDueDate,
-      recurrenceRule: draftRecurrenceRule,
-      recurrenceMode: draftRecurrenceMode,
-      priority: draftPriority,
-      tags: draftTags,
-    });
-    onClose();
+  // Aplica alterações imediatamente offline-first
+  const applyTriageUpdate = (
+    updates: Partial<
+      Pick<
+        UITask,
+        | 'listId'
+        | 'priority'
+        | 'dueDate'
+        | 'recurrenceRule'
+        | 'recurrenceMode'
+        | 'reminders'
+      >
+    >
+  ) => {
+    onApplyTriage(triageTask.id, updates);
   };
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/70 backdrop-blur-xs"
+      className="absolute inset-0 z-50 flex items-end md:items-center justify-center bg-black/70 backdrop-blur-xs pt-[calc(var(--safe-top,0px)+0.75rem)] md:pt-0"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md max-h-[88dvh] native-scroll-container bg-zinc-900 border-t md:border border-zinc-800 rounded-t-3xl md:rounded-2xl p-5 space-y-4 shadow-2xl"
+        style={{
+          paddingBottom:
+            'max(1.25rem, calc(var(--safe-bottom, 0px) - var(--keyboard-height, 0px)))',
+        }}
+        className="w-full max-w-md max-h-[calc(100%-var(--safe-top,0px)-0.75rem)] md:max-h-none native-scroll-container bg-zinc-900 border-t md:border border-zinc-800 rounded-t-3xl md:rounded-2xl p-5 md:pb-5 space-y-4 shadow-2xl"
       >
         <SheetHandle />
 
-        <div className="flex items-start justify-between">
-          <div>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-indigo-400">
               Triagem GTD (Clarificar & Organizar)
             </span>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <h3 className="text-sm font-bold text-zinc-100">
+            <div className="flex items-start gap-1.5 mt-0.5">
+              <h3 className="text-sm font-bold text-zinc-100 break-words whitespace-pre-wrap flex-1 leading-snug">
                 {triageTask.title}
               </h3>
               {triageTask.description.trim().length > 0 && (
                 <span
                   aria-label="Possui anotações"
-                  className="shrink-0 text-zinc-400 inline-flex items-center"
+                  className="shrink-0 text-zinc-400 inline-flex items-center mt-0.5"
                 >
                   <AlignLeft className="w-3.5 h-3.5" />
                 </span>
@@ -143,6 +148,7 @@ export const TriageSheet: React.FC<TriageSheetProps> = ({
             onChange={(nextListId) => {
               void NativeBridge.hapticLightImpact();
               setDraftListId(nextListId);
+              applyTriageUpdate({ listId: nextListId });
             }}
           />
         </div>
@@ -157,6 +163,7 @@ export const TriageSheet: React.FC<TriageSheetProps> = ({
             onChange={(nextDueDate) => {
               void NativeBridge.hapticLightImpact();
               setDraftDueDate(nextDueDate);
+              applyTriageUpdate({ dueDate: nextDueDate });
             }}
           />
         </div>
@@ -173,43 +180,45 @@ export const TriageSheet: React.FC<TriageSheetProps> = ({
               void NativeBridge.hapticLightImpact();
               setDraftRecurrenceRule(recurrenceRule);
               setDraftRecurrenceMode(recurrenceMode);
+              let nextDue = draftDueDate;
               if (recurrenceRule && draftDueDate === null) {
-                setDraftDueDate(Date.now());
+                nextDue = Date.now();
+                setDraftDueDate(nextDue);
               }
+              applyTriageUpdate({
+                recurrenceRule,
+                recurrenceMode,
+                dueDate: nextDue,
+              });
             }}
           />
         </div>
 
-        {/* 4. Contexto GTD (@computador, @rua, #aniversario) */}
+        {/* 4. Lembretes & Notificações */}
         <div>
-          <label className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-            4. Contexto GTD & Energia (@tag)
+          <label className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5 flex items-center gap-1.5">
+            <Bell className="w-3.5 h-3.5 text-amber-400" />
+            4. Lembretes & Notificações
           </label>
-          <div className="flex flex-wrap gap-1.5">
-            {GTD_CONTEXT_SUGGESTIONS.map((ctx) => {
-              const active = draftTags.includes(ctx);
-              return (
-                <button
-                  key={ctx}
-                  type="button"
-                  onClick={() => {
-                    void NativeBridge.hapticLightImpact();
-                    setDraftTags((prev) =>
-                      active ? prev.filter((t) => t !== ctx) : [...prev, ctx]
-                    );
-                  }}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-medium border flex items-center gap-1 ${
-                    active
-                      ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
-                      : 'bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  <Tag className="w-3 h-3" />
-                  <span>{ctx}</span>
-                </button>
-              );
-            })}
-          </div>
+          <CustomReminderPicker
+            dueDate={draftDueDate}
+            reminders={draftReminders}
+            onChange={(nextReminders) => {
+              setDraftReminders(nextReminders);
+              if (draftDueDate === null) {
+                const now = Date.now();
+                setDraftDueDate(now);
+                applyTriageUpdate({ dueDate: now, reminders: nextReminders });
+              } else {
+                applyTriageUpdate({ reminders: nextReminders });
+              }
+            }}
+            onSetDueDateDefault={() => {
+              const now = Date.now();
+              setDraftDueDate(now);
+              applyTriageUpdate({ dueDate: now });
+            }}
+          />
         </div>
 
         {/* 5. Prioridade */}
@@ -227,6 +236,7 @@ export const TriageSheet: React.FC<TriageSheetProps> = ({
                   onClick={() => {
                     void NativeBridge.hapticLightImpact();
                     setDraftPriority(p);
+                    applyTriageUpdate({ priority: p });
                   }}
                   className={`py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                     draftPriority === p
@@ -265,22 +275,18 @@ export const TriageSheet: React.FC<TriageSheetProps> = ({
           </button>
         </div>
 
-        {/* Botão de Salvar Triagem */}
-        <div className="flex gap-2 pt-1">
+        {/* Concluir Triagem */}
+        <div className="pt-1">
           <button
             type="button"
-            onClick={onClose}
-            className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-300 transition-colors"
-          >
-            Cancelar
-          </button>
-          <button
-            type="button"
-            onClick={handleSaveTriage}
-            className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white shadow-lg transition-colors flex items-center justify-center gap-1.5"
+            onClick={() => {
+              void NativeBridge.hapticSwipeAction();
+              onClose();
+            }}
+            className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white shadow-lg transition-colors flex items-center justify-center gap-1.5"
           >
             <Check className="w-4 h-4 stroke-[2.5]" />
-            <span>Salvar Triagem</span>
+            <span>Concluir</span>
           </button>
         </div>
       </div>

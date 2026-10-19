@@ -17,7 +17,6 @@
 
 1. **Quick Capture com NLP Parser:**
    - Prioridades: `!1`, `!2`, `!3`, `!baixa`, `!media`, `!alta`, `!urgente`.
-   - Contextos e Tags: `@computador`, `@rua`, `#energia_baixa`.
    - Listas: `~inbox`, `~"Próximas Ações"`.
    - Processamento de datas naturais em PT-BR (`hoje`, `amanhã`, `segunda`, `+3d`, `dd/mm`).
 2. **Smart Views GTD:**
@@ -78,3 +77,18 @@ VITE_TURSO_AUTH_TOKEN=seu_token_aqui
 # (Opcional) Criptografia da réplica SQLite local
 VITE_LOCAL_DB_ENCRYPTION_KEY=
 ```
+
+---
+
+## 🌐 Deploy no GitHub Pages via GitHub Actions
+
+O repositório está configurado para realizar deploy contínuo no GitHub Pages através do workflow [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
+
+### Passos para ativar no repositório GitHub:
+1. Acesse o repositório no GitHub: **Settings** > **Pages**.
+2. Na seção **Build and deployment** > **Source**, selecione: **GitHub Actions**.
+3. (Opcional) Caso utilize sincronização com o Turso Cloud na Web, adicione as credenciais em **Settings** > **Secrets and variables** > **Actions**:
+   - `VITE_TURSO_DATABASE_URL`
+   - `VITE_TURSO_AUTH_TOKEN`
+4. A cada `push` na branch `main` (ou acionamento manual via **Run workflow** na aba **Actions**), o build será gerado e publicado automaticamente.
+

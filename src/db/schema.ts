@@ -2,9 +2,8 @@ import {
   sqliteTable,
   text,
   integer,
-  primaryKey,
   index,
-   type AnySQLiteColumn,
+  type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core';
 import { relations, sql } from 'drizzle-orm';
 
@@ -64,6 +63,7 @@ export const tasks = sqliteTable(
       .$type<RecurrenceMode>()
       .notNull()
       .default('fixed'), // 'fixed' = pela data agendada; 'after_completion' = após o dia de conclusão
+    reminders: text('reminders'), // JSON serializado de TaskReminder[]
     listId: text('list_id')
       .notNull()
       .references(() => lists.id, { onDelete: 'cascade' }),
@@ -89,34 +89,6 @@ export const tasks = sqliteTable(
 );
 
 /**
- * 3. TABELA DE TAGS E CONTEXTOS GTD (ex: @computador, @rua, #energia_baixa)
- */
-export const tags = sqliteTable('tags', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull().unique(),
-  color: text('color').notNull().default('#10b981'),
-});
-
-/**
- * 4. TABELA PIVÔ TASK_TAGS (N:N)
- */
-export const taskTags = sqliteTable(
-  'task_tags',
-  {
-    taskId: text('task_id')
-      .notNull()
-      .references(() => tasks.id, { onDelete: 'cascade' }),
-    tagId: text('tag_id')
-      .notNull()
-      .references(() => tags.id, { onDelete: 'cascade' }),
-  },
-  (table) => [
-    primaryKey({ columns: [table.taskId, table.tagId] }),
-    index('idx_task_tags_tag').on(table.tagId),
-  ]
-);
-
-/**
  * RELAÇÕES DO DRIZZLE ORM
  */
 export const listsRelations = relations(lists, ({ many }) => ({
@@ -136,26 +108,9 @@ export const tasksRelations = relations(tasks, ({ one, many }) => ({
   subtasks: many(tasks, {
     relationName: 'subtasks',
   }),
-  taskTags: many(taskTags),
-}));
-
-export const tagsRelations = relations(tags, ({ many }) => ({
-  taskTags: many(taskTags),
-}));
-
-export const taskTagsRelations = relations(taskTags, ({ one }) => ({
-  task: one(tasks, {
-    fields: [taskTags.taskId],
-    references: [tasks.id],
-  }),
-  tag: one(tags, {
-    fields: [taskTags.tagId],
-    references: [tags.id],
-  }),
 }));
 
 export type ListRecord = typeof lists.$inferSelect;
 export type NewListRecord = typeof lists.$inferInsert;
 export type TaskRecord = typeof tasks.$inferSelect;
 export type NewTaskRecord = typeof tasks.$inferInsert;
-export type TagRecord = typeof tags.$inferSelect;
