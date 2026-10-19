@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Meu GTD</string>
+    <string name="title_activity_main">Meu GTD</string>
+    <string name="package_name">com.meugtd.tasks</string>
+    <string name="custom_url_scheme">com.meugtd.tasks</string>
+</resources>
