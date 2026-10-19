@@ -47,7 +47,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {sidebarOpen && (
           <div className="flex items-center gap-2.5">
             <img
-              src="/icon.svg"
+              src={`${import.meta.env.BASE_URL}icon.svg`}
               alt="GTD Flow"
               className="w-5 h-5 rounded-md shrink-0"
             />

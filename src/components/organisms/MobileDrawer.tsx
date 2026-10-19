@@ -60,7 +60,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({
         <div className="flex items-center justify-between px-4 h-14 border-b border-zinc-800/80">
           <div className="flex items-center gap-2.5">
             <img
-              src="/icon.svg"
+              src={`${import.meta.env.BASE_URL}icon.svg`}
               alt="Meu GTD"
               className="w-5 h-5 rounded-md shrink-0"
             />
