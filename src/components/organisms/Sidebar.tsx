@@ -8,6 +8,7 @@ import {
 import { NativeBridge } from '../../lib/native';
 import { SMART_VIEW_ITEMS } from '../../constants/priority';
 import { SyncStatusButton } from '../molecules/SyncStatusButton';
+import { BuildInfo } from '../atoms/BuildInfo';
 import type { UIList } from '../../types/task';
 
 interface SidebarProps {
@@ -204,13 +205,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </nav>
 
       {/* Status do Turso Embedded Replica */}
-      <div className="p-3 border-t border-zinc-800/80">
+      <div className="p-3 border-t border-zinc-800/80 flex flex-col gap-2">
         <SyncStatusButton
           syncState={syncState}
           pendingCount={pendingCount}
           showLabel={sidebarOpen}
           onClick={onSync}
         />
+        {sidebarOpen && <BuildInfo className="text-center px-1" />}
       </div>
     </aside>
   );
