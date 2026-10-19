@@ -1,0 +1,1 @@
+ALTER TABLE `tasks` ADD `recurrence_mode` text DEFAULT 'fixed' NOT NULL;

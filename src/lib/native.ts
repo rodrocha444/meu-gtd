@@ -25,6 +25,21 @@ export const NativeBridge = {
   },
 
   /**
+   * Haptic de impacto médio (ex: exclusão confirmada ou descarte)
+   */
+  async hapticMediumImpact(): Promise<void> {
+    try {
+      if (Capacitor.isNativePlatform()) {
+        await Haptics.impact({ style: ImpactStyle.Medium });
+      } else if ('vibrate' in navigator) {
+        navigator.vibrate(18);
+      }
+    } catch {
+      // No-op
+    }
+  },
+
+  /**
    * Haptic leve ao mudar prioridade, alternar abas ou atingir limiar de swipe
    */
   async hapticLightImpact(): Promise<void> {
@@ -55,6 +70,21 @@ export const NativeBridge = {
   },
 
   /**
+   * Haptic de erro/falha em operações de banco de dados ou rede
+   */
+  async hapticError(): Promise<void> {
+    try {
+      if (Capacitor.isNativePlatform()) {
+        await Haptics.notification({ type: NotificationType.Error });
+      } else if ('vibrate' in navigator) {
+        navigator.vibrate([30, 50, 30]);
+      }
+    } catch {
+      // No-op
+    }
+  },
+
+  /**
    * Sincroniza a StatusBar nativa com o tema (Dark / Light)
    */
   async syncStatusBarTheme(theme: 'dark' | 'light'): Promise<void> {
@@ -74,26 +104,106 @@ export const NativeBridge = {
   },
 
   /**
-   * Registra listeners do @capacitor/keyboard para ajustar a variável CSS --keyboard-height
-   * garantindo que a barra de Quick Capture suba suavemente junto com o teclado
+   * Registra listeners do @capacitor/keyboard e VisualViewport para gerenciar o estado
+   * do teclado e manter a área útil da aplicação perfeitamente sincronizada,
+   * bloqueando o panning indevido do WebKit no iOS PWA Standalone.
    */
   async registerKeyboardListeners(): Promise<() => void> {
     if (!Capacitor.isNativePlatform()) {
-      // Fallback com VisualViewport API para PWA iOS/Android
+      // Fallback seguro com VisualViewport API para browsers móveis e PWAs
       const vv = window.visualViewport;
       if (!vv) return () => {};
-      const handleViewportResize = () => {
-        const offset = Math.max(0, window.innerHeight - vv.height);
+
+      // Trava o scroll da janela em (0, 0) para anular o auto-scroll errático do WebKit no iOS PWA
+      const resetWindowScroll = () => {
+        if (window.scrollY !== 0 || window.scrollX !== 0) {
+          window.scrollTo(0, 0);
+        }
+        if (document.documentElement.scrollTop !== 0) {
+          document.documentElement.scrollTop = 0;
+        }
+        if (document.body.scrollTop !== 0) {
+          document.body.scrollTop = 0;
+        }
+      };
+
+      const updateOffset = () => {
+        const activeTag = document.activeElement?.tagName;
+        const isInputFocused =
+          activeTag === 'INPUT' ||
+          activeTag === 'TEXTAREA' ||
+          (document.activeElement as HTMLElement)?.isContentEditable;
+        const diff = Math.max(0, window.innerHeight - vv.height);
+        const isKeyboardOpen = Boolean(isInputFocused && diff > 150);
+
+        resetWindowScroll();
+
+        document.documentElement.style.setProperty(
+          '--app-height',
+          `${vv.height}px`
+        );
         document.documentElement.style.setProperty(
           '--keyboard-height',
-          `${offset}px`
+          isKeyboardOpen ? `${diff}px` : '0px'
         );
+
+        if (isKeyboardOpen) {
+          document.body.classList.add('keyboard-open');
+        } else {
+          document.body.classList.remove('keyboard-open');
+        }
       };
-      vv.addEventListener('resize', handleViewportResize);
-      return () => vv.removeEventListener('resize', handleViewportResize);
+
+      const handleFocusIn = (e: FocusEvent) => {
+        const target = e.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.isContentEditable)
+        ) {
+          resetWindowScroll();
+          requestAnimationFrame(resetWindowScroll);
+          setTimeout(resetWindowScroll, 30);
+          setTimeout(resetWindowScroll, 100);
+          setTimeout(resetWindowScroll, 250);
+        }
+      };
+
+      const handleBlur = () => {
+        document.body.classList.remove('keyboard-open');
+        document.documentElement.style.setProperty('--keyboard-height', '0px');
+        resetWindowScroll();
+        if (window.visualViewport) {
+          document.documentElement.style.setProperty(
+            '--app-height',
+            `${window.visualViewport.height}px`
+          );
+        }
+      };
+
+      // Inicializa a altura do viewport e scroll
+      updateOffset();
+
+      vv.addEventListener('resize', updateOffset);
+      vv.addEventListener('scroll', updateOffset);
+      window.addEventListener('scroll', resetWindowScroll, { passive: true });
+      document.addEventListener('focusin', handleFocusIn, true);
+      window.addEventListener('blur', handleBlur, true);
+      document.addEventListener('focusout', handleBlur);
+
+      return () => {
+        vv.removeEventListener('resize', updateOffset);
+        vv.removeEventListener('scroll', updateOffset);
+        window.removeEventListener('scroll', resetWindowScroll);
+        document.removeEventListener('focusin', handleFocusIn, true);
+        window.removeEventListener('blur', handleBlur, true);
+        document.removeEventListener('focusout', handleBlur);
+      };
     }
 
     const showSub = await Keyboard.addListener('keyboardWillShow', (info) => {
+      document.body.classList.add('keyboard-open');
       document.documentElement.style.setProperty(
         '--keyboard-height',
         `${info.keyboardHeight}px`
@@ -101,6 +211,7 @@ export const NativeBridge = {
     });
 
     const hideSub = await Keyboard.addListener('keyboardWillHide', () => {
+      document.body.classList.remove('keyboard-open');
       document.documentElement.style.setProperty('--keyboard-height', '0px');
     });
 

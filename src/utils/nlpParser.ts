@@ -1,4 +1,5 @@
-import type { TaskPriority } from '../db/schema';
+import type { RecurrenceMode, TaskPriority } from '../db/schema';
+import { buildRRule, formatRecurrenceBadge, type RecurrenceFrequency } from './recurrence';
 
 export interface ParsedQuickTask {
   /** Título limpo sem os metadados extraídos */
@@ -13,6 +14,12 @@ export interface ParsedQuickTask {
   dueDate: number | null;
   /** Rótulo amigável da data detectada para preview na UI */
   detectedDateLabel: string | null;
+  /** Regra RRule extraída (ex: FREQ=YEARLY;INTERVAL=1) */
+  recurrenceRule: string | null;
+  /** Modo de repetição: 'fixed' (padrão pela data) ou 'after_completion' (após concluir) */
+  recurrenceMode: RecurrenceMode;
+  /** Rótulo amigável da recorrência detectada */
+  detectedRecurrenceLabel: string | null;
 }
 
 const PRIORITY_MAP: Record<string, TaskPriority> = {
@@ -63,8 +70,8 @@ function atNineAM(base: Date, addDays = 0): Date {
  *
  * Exemplos suportados:
  * - "Enviar contrato assinado !alta @computador ~trabalho amanhã"
- * - "Comprar café em grãos @rua #energia_baixa !1 hoje"
- * - "Revisar arquitetura offline-first !3 ~next_actions +3d"
+ * - "Aniversário da Mariana 25/10 todo ano #aniversario"
+ * - "Limpar filtro do ar-condicionado a cada 30 dias após concluir"
  */
 export function parseQuickCaptureInput(
   rawInput: string,
@@ -76,6 +83,8 @@ export function parseQuickCaptureInput(
   let targetListQuery: string | null = null;
   let dueDate: number | null = null;
   let detectedDateLabel: string | null = null;
+  let recurrenceRule: string | null = null;
+  let recurrenceMode: RecurrenceMode = 'fixed';
 
   // 1. Extrair Prioridade: !1, !2, !3, !alta, !média, !baixa, !urgente
   const priorityRegex = /(?:^|\s)!(0|1|2|3|baixa|low|m[eé]dia|med|alta|urgente|high|nenhuma)\b/gi;
@@ -108,8 +117,52 @@ export function parseQuickCaptureInput(
     }
   );
 
-  // 4. Extrair Expressões de Data em Português
-  // 4a. "depois de amanhã"
+  // 4. Extrair Modificador de Recorrência por Conclusão: "após concluir" / "após conclusão"
+  const afterCompletionRegex = /(?:^|\s)\bap[oó]s\s+(?:concluir|conclus[aã]o)\b/i;
+  if (afterCompletionRegex.test(workingText)) {
+    recurrenceMode = 'after_completion';
+    workingText = workingText.replace(afterCompletionRegex, ' ');
+  }
+
+  // 5. Extrair Regras de Recorrência em PT-BR
+  // 5a. "a cada N dias|semanas|meses|anos"
+  const customIntervalRegex =
+    /(?:^|\s)\ba\s+cada\s+(\d{1,3})\s+(dia|dias|semana|semanas|m[eê]s|meses|ano|anos)\b/i;
+  const intervalMatch = workingText.match(customIntervalRegex);
+  if (intervalMatch && intervalMatch[1] && intervalMatch[2]) {
+    const interval = Math.max(1, Number.parseInt(intervalMatch[1], 10));
+    const unit = intervalMatch[2].toLowerCase();
+    let freq: RecurrenceFrequency = 'DAILY';
+    if (unit.startsWith('semana')) freq = 'WEEKLY';
+    else if (unit.startsWith('m')) freq = 'MONTHLY';
+    else if (unit.startsWith('ano')) freq = 'YEARLY';
+
+    recurrenceRule = buildRRule(freq, interval);
+    workingText = workingText.replace(customIntervalRegex, ' ');
+  }
+
+  // 5b. Expressões simples: "todo dia", "toda semana", "todo mês", "todo ano", "anual", "mensal", "semanal", "diariamente"
+  if (!recurrenceRule) {
+    const simpleRecurrenceRegex =
+      /(?:^|\s)\b(todo\s+dia|diariamente|toda\s+semana|semanalmente|semanal|todo\s+m[eê]s|mensalmente|mensal|todo\s+ano|anualmente|anual)\b/i;
+    const recMatch = workingText.match(simpleRecurrenceRegex);
+    if (recMatch && recMatch[1]) {
+      const token = recMatch[1].toLowerCase();
+      if (token.includes('dia')) {
+        recurrenceRule = buildRRule('DAILY', 1);
+      } else if (token.includes('semana')) {
+        recurrenceRule = buildRRule('WEEKLY', 1);
+      } else if (token.includes('mês') || token.includes('mes') || token.includes('mensal')) {
+        recurrenceRule = buildRRule('MONTHLY', 1);
+      } else {
+        recurrenceRule = buildRRule('YEARLY', 1);
+      }
+      workingText = workingText.replace(simpleRecurrenceRegex, ' ');
+    }
+  }
+
+  // 6. Extrair Expressões de Data em Português
+  // 6a. "depois de amanhã"
   const afterTomorrowRegex = /(?:^|\s)\bdepois\s+de\s+amanh[aã]\b/i;
   if (afterTomorrowRegex.test(workingText)) {
     const target = atNineAM(now, 2);
@@ -118,7 +171,7 @@ export function parseQuickCaptureInput(
     workingText = workingText.replace(afterTomorrowRegex, ' ');
   }
 
-  // 4b. "hoje" / "amanhã" / "próxima semana"
+  // 6b. "hoje" / "amanhã" / "próxima semana"
   if (dueDate === null) {
     const relativeWordRegex =
       /(?:^|\s)\b(hoje|amanh[aã]|pr[oó]xima\s+semana)\b/i;
@@ -139,7 +192,7 @@ export function parseQuickCaptureInput(
     }
   }
 
-  // 4c. Offset curto "+Nd" (ex: +2d, +7d)
+  // 6c. Offset curto "+Nd" (ex: +2d, +7d)
   if (dueDate === null) {
     const offsetDaysRegex = /(?:^|\s)\+(\d{1,3})d\b/i;
     const match = workingText.match(offsetDaysRegex);
@@ -151,7 +204,7 @@ export function parseQuickCaptureInput(
     }
   }
 
-  // 4d. Dias da semana (segunda, terça, quarta, quinta, sexta, sábado, domingo)
+  // 6d. Dias da semana (segunda, terça, quarta, quinta, sexta, sábado, domingo)
   if (dueDate === null) {
     const weekdayRegex =
       /(?:^|\s)\b(domingo|segunda(?:-feira)?|ter[cç]a(?:-feira)?|quarta(?:-feira)?|quinta(?:-feira)?|sexta(?:-feira)?|s[aá]bado)\b/i;
@@ -171,7 +224,7 @@ export function parseQuickCaptureInput(
     }
   }
 
-  // 4e. Data explícita DD/MM (ex: 25/10)
+  // 6e. Data explícita DD/MM (ex: 25/10)
   if (dueDate === null) {
     const explicitDateRegex = /(?:^|\s)\b(\d{1,2})\/(\d{1,2})\b/;
     const match = workingText.match(explicitDateRegex);
@@ -192,6 +245,17 @@ export function parseQuickCaptureInput(
     }
   }
 
+  // Se tiver recorrência e nenhuma data foi informada, assume "Hoje" como data inicial
+  if (recurrenceRule && dueDate === null) {
+    dueDate = atNineAM(now, 0).getTime();
+    detectedDateLabel = 'Hoje';
+  }
+
+  const detectedRecurrenceLabel = formatRecurrenceBadge(
+    recurrenceRule,
+    recurrenceMode
+  );
+
   const cleanTitle = workingText.replace(/\s+/g, ' ').trim();
 
   return {
@@ -201,5 +265,8 @@ export function parseQuickCaptureInput(
     targetListQuery,
     dueDate,
     detectedDateLabel,
+    recurrenceRule,
+    recurrenceMode,
+    detectedRecurrenceLabel,
   };
 }

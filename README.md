@@ -29,7 +29,6 @@
    - **Algum Dia:** Ideias e projetos futuros.
 3. **TickTick Feel & Native Mobile:**
    - Checkbox estilizado com cor por prioridade (Alta: Vermelho, Média: Amarelo, Baixa: Azul).
-   - Suporte a status *Won't Do* (`wont_do`).
    - Gestos de Swipe no mobile (Direita = Concluir com Haptics; Esquerda = Triagem GTD).
    - Anti-Browser UX (bloqueio de scroll elástico no root, safe-area insets, sem menus de contexto acidentais).
 

@@ -11,8 +11,9 @@ import { relations, sql } from 'drizzle-orm';
 /**
  * Tipos de domínio estritos para Status e Prioridade (TickTick + GTD)
  */
-export type TaskStatus = 'pending' | 'completed' | 'wont_do';
+export type TaskStatus = 'pending' | 'completed';
 export type TaskPriority = 0 | 1 | 2 | 3; // 0: None, 1: Low, 2: Medium, 3: High
+export type RecurrenceMode = 'fixed' | 'after_completion';
 
 /**
  * 1. TABELA DE LISTAS (GTD System Lists + Projetos Customizados)
@@ -36,7 +37,7 @@ export const lists = sqliteTable(
 );
 
 /**
- * 2. TABELA DE TAREFAS (Suporte a hierarquia de subtarefas, recorrência RRule e GTD)
+ * 2. TABELA DE TAREFAS (Suporte a hierarquia de subtarefas, recorrência RRule + Modo e GTD)
  */
 export const tasks = sqliteTable(
   'tasks',
@@ -44,7 +45,7 @@ export const tasks = sqliteTable(
     id: text('id').primaryKey(),
     title: text('title').notNull(),
     description: text('description').notNull().default(''), // Markdown
-    status: text('status', { enum: ['pending', 'completed', 'wont_do'] })
+    status: text('status', { enum: ['pending', 'completed'] })
       .$type<TaskStatus>()
       .notNull()
       .default('pending'),
@@ -57,6 +58,12 @@ export const tasks = sqliteTable(
       .default(false),
     dueDate: integer('due_date', { mode: 'timestamp_ms' }),
     recurrenceRule: text('recurrence_rule'), // RRule RFC 5545 (ex: "FREQ=DAILY;INTERVAL=1")
+    recurrenceMode: text('recurrence_mode', {
+      enum: ['fixed', 'after_completion'],
+    })
+      .$type<RecurrenceMode>()
+      .notNull()
+      .default('fixed'), // 'fixed' = pela data agendada; 'after_completion' = após o dia de conclusão
     listId: text('list_id')
       .notNull()
       .references(() => lists.id, { onDelete: 'cascade' }),

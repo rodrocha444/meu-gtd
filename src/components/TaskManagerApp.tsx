@@ -1,459 +1,263 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Inbox,
-  Calendar,
-  CalendarDays,
-  Zap,
-  Clock,
-  Sparkles,
-  FolderKanban,
-  Plus,
-  Check,
-  X,
-  Pin,
-  ChevronRight,
-  PanelLeftClose,
-  PanelLeftOpen,
-  ArrowRightLeft,
-  Tag,
-  Flag,
+  AlertCircle,
+  CheckCircle2,
   RefreshCw,
-  Ban,
-  CornerDownRight,
+  Trash2,
+  X,
 } from 'lucide-react';
 import type { TaskPriority, TaskStatus } from '../db/schema';
-import { syncEmbeddedReplica } from '../db/client';
+import {
+  createTaskInDb,
+  updateTaskInDb,
+  deleteTaskInDb,
+  createListInDb,
+  deleteListInDb,
+  fetchListsFromDb,
+  fetchTasksFromDb,
+  syncEmbeddedReplica,
+  GTD_SYSTEM_LISTS,
+} from '../db/client';
 import { NativeBridge } from '../lib/native';
 import { parseQuickCaptureInput } from '../utils/nlpParser';
+import { calculateNextDueDate } from '../utils/recurrence';
+import { CalendarView } from './CalendarView';
+import type { CustomSelectOption } from './ui/CustomControls';
+import {
+  DatabaseErrorModal,
+  type DatabaseErrorInfo,
+  isNetworkOrOfflineError,
+} from './ui/DatabaseErrorModal';
+import { ConfirmModal } from './ui/ConfirmModal';
+import { NewProjectModal } from './ui/NewProjectModal';
+import { Sidebar } from './organisms/Sidebar';
+import { MobileDrawer } from './organisms/MobileDrawer';
+import { MainHeader } from './organisms/MainHeader';
+import { TaskList } from './organisms/TaskList';
+import { ProjectsHub } from './organisms/ProjectsHub';
+import { QuickCaptureBar } from './organisms/QuickCaptureBar';
+import { TaskDetailSheet } from './organisms/TaskDetailSheet';
+import { TriageSheet } from './organisms/TriageSheet';
+import type { ProjectStat } from './molecules/ProjectCard';
+import type { UIList, UITask, SmartViewId } from '../types/task';
 
-/**
- * Modelo em memória sincronizado com o schema Drizzle ORM (lists, tasks, tags, task_tags)
- */
-export interface UIList {
-  id: string;
-  name: string;
-  color: string;
-  icon: string;
-  isGtdSystem: boolean;
-  sortOrder: number;
-}
+export type { UIList, UITask, SmartViewId };
 
-export interface UITask {
-  id: string;
-  title: string;
-  description: string;
-  status: TaskStatus;
-  priority: TaskPriority;
-  isPinned: boolean;
-  dueDate: number | null;
-  recurrenceRule: string | null;
-  listId: string;
-  parentTaskId: string | null;
-  tags: string[]; // ex: ['@computador', '#energia_baixa']
-  sortOrder: number;
-  createdAt: number;
-  updatedAt: number;
-  completedAt: number | null;
-}
+const CACHE_KEYS = {
+  LISTS: 'meu_gtd_cached_lists',
+  TASKS: 'meu_gtd_cached_tasks',
+};
 
-export type SmartViewId =
-  | 'inbox'
-  | 'today'
-  | 'next_7_days'
-  | 'next_actions'
-  | 'waiting_for'
-  | 'someday'
-  | string;
-
-/**
- * Configuração visual de cores do Checkbox estilo TickTick por Prioridade
- */
-const PRIORITY_META: Record<
-  TaskPriority,
-  {
-    label: string;
-    checkboxBorder: string;
-    checkboxBgActive: string;
-    badgeClass: string;
-    dotClass: string;
+function loadCachedLists(): UIList[] {
+  try {
+    const raw = localStorage.getItem(CACHE_KEYS.LISTS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : [];
+  } catch {
+    return [];
   }
-> = {
-  3: {
-    label: 'Alta',
-    checkboxBorder: 'border-red-500 hover:bg-red-500/15',
-    checkboxBgActive: 'bg-red-500 border-red-500 text-white',
-    badgeClass: 'text-red-400 bg-red-500/10 border-red-500/30',
-    dotClass: 'bg-red-500',
-  },
-  2: {
-    label: 'Média',
-    checkboxBorder: 'border-amber-400 hover:bg-amber-400/15',
-    checkboxBgActive: 'bg-amber-400 border-amber-400 text-zinc-950',
-    badgeClass: 'text-amber-300 bg-amber-400/10 border-amber-400/30',
-    dotClass: 'bg-amber-400',
-  },
-  1: {
-    label: 'Baixa',
-    checkboxBorder: 'border-blue-500 hover:bg-blue-500/15',
-    checkboxBgActive: 'bg-blue-500 border-blue-500 text-white',
-    badgeClass: 'text-blue-400 bg-blue-500/10 border-blue-500/30',
-    dotClass: 'bg-blue-500',
-  },
-  0: {
-    label: 'Nenhuma',
-    checkboxBorder: 'border-zinc-500 hover:bg-zinc-500/15',
-    checkboxBgActive: 'bg-zinc-500 border-zinc-500 text-white',
-    badgeClass: 'text-zinc-400 bg-zinc-800 border-zinc-700',
-    dotClass: 'bg-zinc-500',
-  },
-};
-
-const INITIAL_LISTS: UIList[] = [
-  { id: 'inbox', name: 'Inbox', color: '#3b82f6', icon: 'inbox', isGtdSystem: true, sortOrder: 0 },
-  { id: 'next_actions', name: 'Ações Seguintes', color: '#10b981', icon: 'zap', isGtdSystem: true, sortOrder: 1 },
-  { id: 'waiting_for', name: 'Aguardando', color: '#f59e0b', icon: 'clock', isGtdSystem: true, sortOrder: 2 },
-  { id: 'someday', name: 'Algum Dia', color: '#8b5cf6', icon: 'sparkles', isGtdSystem: true, sortOrder: 3 },
-  // Listas de Projetos para Triagem GTD
-  { id: 'trabalho', name: 'Trabalho', color: '#ec4899', icon: 'folder', isGtdSystem: false, sortOrder: 4 },
-  { id: 'pessoal', name: 'Vida Pessoal', color: '#06b6d4', icon: 'folder', isGtdSystem: false, sortOrder: 5 },
-];
-
-const GTD_CONTEXT_SUGGESTIONS = [
-  '@computador',
-  '@rua',
-  '@telefone',
-  '@casa',
-  '#energia_baixa',
-  '#foco_profundo',
-];
-
-const nowMs = Date.now();
-const today9am = new Date();
-today9am.setHours(9, 0, 0, 0);
-
-const INITIAL_TASKS: UITask[] = [
-  {
-    id: 't-1',
-    title: 'Revisar proposta comercial do cliente Enterprise',
-    description: 'Verificar cláusulas de SLA e aprovar com o jurídico.',
-    status: 'pending',
-    priority: 3,
-    isPinned: true,
-    dueDate: today9am.getTime(),
-    recurrenceRule: null,
-    listId: 'inbox',
-    parentTaskId: null,
-    tags: ['@computador', '#foco_profundo'],
-    sortOrder: 1,
-    createdAt: nowMs - 3600_000,
-    updatedAt: nowMs - 3600_000,
-    completedAt: null,
-  },
-  {
-    id: 't-2',
-    title: 'Passar na lavanderia e comprar café em grãos',
-    description: '',
-    status: 'pending',
-    priority: 1,
-    isPinned: false,
-    dueDate: today9am.getTime(),
-    recurrenceRule: null,
-    listId: 'inbox',
-    parentTaskId: null,
-    tags: ['@rua', '#energia_baixa'],
-    sortOrder: 2,
-    createdAt: nowMs - 7200_000,
-    updatedAt: nowMs - 7200_000,
-    completedAt: null,
-  },
-  {
-    id: 't-3',
-    title: 'Configurar Embedded Replicas do Turso no app mobile',
-    description: 'Validar sincronização offline-first com SQLite local.',
-    status: 'pending',
-    priority: 2,
-    isPinned: false,
-    dueDate: today9am.getTime() + 86_400_000 * 2,
-    recurrenceRule: null,
-    listId: 'next_actions',
-    parentTaskId: null,
-    tags: ['@computador'],
-    sortOrder: 3,
-    createdAt: nowMs - 10800_000,
-    updatedAt: nowMs - 10800_000,
-    completedAt: null,
-  },
-  {
-    id: 't-4',
-    title: 'Resposta do fornecedor sobre nota fiscal #409',
-    description: 'Cobrar novamente na quinta-feira se não responderem.',
-    status: 'pending',
-    priority: 2,
-    isPinned: false,
-    dueDate: today9am.getTime() + 86_400_000 * 3,
-    recurrenceRule: 'FREQ=WEEKLY;INTERVAL=1',
-    listId: 'waiting_for',
-    parentTaskId: null,
-    tags: ['@telefone'],
-    sortOrder: 4,
-    createdAt: nowMs - 14400_000,
-    updatedAt: nowMs - 14400_000,
-    completedAt: null,
-  },
-  {
-    id: 't-5',
-    title: 'Aprender Rust para módulos nativos WebAssembly',
-    description: '',
-    status: 'pending',
-    priority: 0,
-    isPinned: false,
-    dueDate: null,
-    recurrenceRule: null,
-    listId: 'someday',
-    parentTaskId: null,
-    tags: ['#estudo'],
-    sortOrder: 5,
-    createdAt: nowMs - 20000_000,
-    updatedAt: nowMs - 20000_000,
-    completedAt: null,
-  },
-];
-
-/**
- * Item de Tarefa com suporte a Swipe Nativo (Direita = Concluir + Haptics, Esquerda = Triagem/Agendar)
- * e Checkbox TickTick colorido por prioridade + suporte a "Won't Do"
- */
-interface SwipeableTaskRowProps {
-  task: UITask;
-  subtasks: UITask[];
-  listName: string;
-  isSelected: boolean;
-  onSelect: (task: UITask) => void;
-  onToggleStatus: (task: UITask, targetStatus?: TaskStatus) => void;
-  onOpenTriage: (task: UITask) => void;
 }
 
-const SwipeableTaskRow: React.FC<SwipeableTaskRowProps> = ({
-  task,
-  subtasks,
-  listName,
-  isSelected,
-  onSelect,
-  onToggleStatus,
-  onOpenTriage,
-}) => {
-  const [dragOffset, setDragOffset] = useState(0);
-  const startXRef = useRef<number | null>(null);
-  const thresholdTriggeredRef = useRef(false);
+function loadCachedTasks(): UITask[] {
+  try {
+    const raw = localStorage.getItem(CACHE_KEYS.TASKS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
-  const SWIPE_THRESHOLD = 76;
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    const firstTouch = e.touches[0];
-    if (!firstTouch) return;
-    startXRef.current = firstTouch.clientX;
-    thresholdTriggeredRef.current = false;
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (startXRef.current === null) return;
-    const firstTouch = e.touches[0];
-    if (!firstTouch) return;
-    const deltaX = firstTouch.clientX - startXRef.current;
-    const clamped = Math.max(-120, Math.min(120, deltaX));
-    setDragOffset(clamped);
-
-    if (Math.abs(clamped) >= SWIPE_THRESHOLD && !thresholdTriggeredRef.current) {
-      thresholdTriggeredRef.current = true;
-      void NativeBridge.hapticLightImpact();
-    } else if (
-      Math.abs(clamped) < SWIPE_THRESHOLD &&
-      thresholdTriggeredRef.current
-    ) {
-      thresholdTriggeredRef.current = false;
-    }
-  };
-
-  const handleTouchEnd = () => {
-    if (dragOffset >= SWIPE_THRESHOLD) {
-      // Swipe Direito -> Concluir com Haptics (ImpactStyle.Medium)
-      onToggleStatus(task, task.status === 'completed' ? 'pending' : 'completed');
-    } else if (dragOffset <= -SWIPE_THRESHOLD) {
-      // Swipe Esquerdo -> Agendar data / Mover de lista (Triagem GTD)
-      void NativeBridge.hapticSwipeAction();
-      onOpenTriage(task);
-    }
-    setDragOffset(0);
-    startXRef.current = null;
-  };
-
-  const pMeta = PRIORITY_META[task.priority];
-  const isDoneOrWontDo = task.status === 'completed' || task.status === 'wont_do';
-
-  const formattedDate = useMemo(() => {
-    if (!task.dueDate) return null;
-    const d = new Date(task.dueDate);
-    const today = new Date();
-    const tomorrow = new Date();
-    tomorrow.setDate(today.getDate() + 1);
-
-    if (d.toDateString() === today.toDateString()) return 'Hoje';
-    if (d.toDateString() === tomorrow.toDateString()) return 'Amanhã';
-    return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
-  }, [task.dueDate]);
-
-  return (
-    <div className="relative overflow-hidden rounded-xl mb-1.5 bg-zinc-900/90 border border-zinc-800/80">
-      {/* Camadas de fundo reveladas durante o gesto de Swipe */}
-      <div className="absolute inset-0 flex items-center justify-between px-4 pointer-events-none">
-        {/* Fundo Swipe Direito (Concluir) */}
-        <div
-          className={`flex items-center gap-2 text-xs font-semibold transition-opacity ${
-            dragOffset > 15 ? 'opacity-100 text-emerald-400' : 'opacity-0'
-          }`}
-        >
-          <Check className="w-4 h-4" />
-          <span>Concluir</span>
-        </div>
-
-        {/* Fundo Swipe Esquerdo (Triagem / Agendar / Mover) */}
-        <div
-          className={`flex items-center gap-2 text-xs font-semibold transition-opacity ${
-            dragOffset < -15 ? 'opacity-100 text-amber-400' : 'opacity-0'
-          }`}
-        >
-          <span>Triagem / Mover</span>
-          <ArrowRightLeft className="w-4 h-4" />
-        </div>
-      </div>
-
-      {/* Superfície Deslizante Principal */}
-      <div
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        onClick={() => onSelect(task)}
-        style={{
-          transform: `translate3d(${dragOffset}px, 0, 0)`,
-          transition: startXRef.current === null ? 'transform 180ms ease-out' : 'none',
-        }}
-        className={`relative z-10 flex items-start gap-3 px-3.5 py-3 cursor-pointer transition-colors ${
-          isSelected
-            ? 'bg-zinc-800/95'
-            : 'bg-zinc-900 hover:bg-zinc-800/60 active:bg-zinc-800'
-        }`}
-      >
-        {/* Checkbox Customizado TickTick (Muda de cor por Prioridade + Suporte Won't Do) */}
-        <button
-          type="button"
-          aria-label="Alternar conclusão da tarefa"
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleStatus(
-              task,
-              task.status === 'completed' ? 'pending' : 'completed'
-            );
-          }}
-          className={`mt-0.5 w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-all ${
-            task.status === 'completed'
-              ? pMeta.checkboxBgActive
-              : task.status === 'wont_do'
-              ? 'bg-zinc-700 border-zinc-600 text-zinc-300'
-              : pMeta.checkboxBorder
-          }`}
-        >
-          {task.status === 'completed' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-          {task.status === 'wont_do' && <X className="w-3.5 h-3.5 stroke-[3]" />}
-        </button>
-
-        {/* Conteúdo Central da Tarefa */}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            {task.isPinned && (
-              <Pin className="w-3.5 h-3.5 text-indigo-400 shrink-0 rotate-45" />
-            )}
-            <span
-              className={`text-sm font-medium truncate ${
-                isDoneOrWontDo
-                  ? 'line-through text-zinc-500'
-                  : 'text-zinc-100'
-              }`}
-            >
-              {task.title}
-            </span>
-            {task.status === 'wont_do' && (
-              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-semibold">
-                Não farei
-              </span>
-            )}
-          </div>
-
-          {/* Metadados GTD: Contextos (@tag), Lista, Subtarefas e Data */}
-          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-            <span className="text-[11px] text-zinc-400 bg-zinc-800/90 px-1.5 py-0.5 rounded">
-              {listName}
-            </span>
-
-            {task.tags.map((tag) => (
-              <span
-                key={tag}
-                className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${
-                  tag.startsWith('@')
-                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                    : 'bg-indigo-500/10 text-indigo-300 border border-indigo-500/20'
-                }`}
-              >
-                {tag}
-              </span>
-            ))}
-
-            {subtasks.length > 0 && (
-              <span className="text-[11px] text-zinc-400 flex items-center gap-0.5">
-                <CornerDownRight className="w-3 h-3" />
-                {subtasks.filter((s) => s.status === 'completed').length}/
-                {subtasks.length}
-              </span>
-            )}
-
-            {formattedDate && (
-              <span className="text-[11px] text-amber-400/90 bg-amber-500/10 px-1.5 py-0.5 rounded ml-auto">
-                {formattedDate}
-              </span>
-            )}
-          </div>
-        </div>
-
-        {/* Botão Rápido de Triagem GTD (Especialmente útil na Inbox) */}
-        <button
-          type="button"
-          title="Triagem Rápida GTD (Lista, @Contexto e Prioridade)"
-          onClick={(e) => {
-            e.stopPropagation();
-            void NativeBridge.hapticLightImpact();
-            onOpenTriage(task);
-          }}
-          className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0"
-        >
-          <ArrowRightLeft className="w-4 h-4" />
-        </button>
-      </div>
-    </div>
-  );
-};
+function saveCache(lists: UIList[], tasks: UITask[]) {
+  try {
+    localStorage.setItem(CACHE_KEYS.LISTS, JSON.stringify(lists));
+    localStorage.setItem(CACHE_KEYS.TASKS, JSON.stringify(tasks));
+  } catch {
+    // Modo anônimo ou limite de quota atingido
+  }
+}
 
 /**
- * Componente Principal da Aplicação (TickTick Core + Método GTD)
+ * Componente Principal da Aplicação (TickTick Core + Método GTD + Calendário & Repetições)
+ * Orquestrador estruturado segundo Atomic Design
  */
 export const TaskManagerApp: React.FC = () => {
-  const [lists] = useState<UIList[]>(INITIAL_LISTS);
-  const [tasks, setTasks] = useState<UITask[]>(INITIAL_TASKS);
-  const [activeView, setActiveView] = useState<SmartViewId>('inbox');
+  const [lists, setLists] = useState<UIList[]>(() => {
+    const cached = loadCachedLists();
+    if (cached.length > 0) return cached;
+    return GTD_SYSTEM_LISTS.map((l) => ({
+      id: l.id,
+      name: l.name,
+      color: l.color ?? '#6366f1',
+      icon: l.icon ?? 'inbox',
+      isGtdSystem: Boolean(l.isGtdSystem),
+      sortOrder: l.sortOrder ?? 0,
+    }));
+  });
+  const [tasks, setTasks] = useState<UITask[]>(() => loadCachedTasks());
+  const [isLoading, setIsLoading] = useState<boolean>(() => loadCachedTasks().length === 0);
+  const hasUserSelectedViewRef = useRef(false);
+  const [activeView, setActiveView] = useState<SmartViewId>(() => {
+    const cached = loadCachedTasks();
+    const hasInboxTasks = cached.some(
+      (t) => t.parentTaskId === null && t.status === 'pending' && t.listId === 'inbox'
+    );
+    return hasInboxTasks ? 'inbox' : 'today';
+  });
+  const [viewLayout, setViewLayout] = useState<'list' | 'calendar'>('list');
+
+  // Navegação explícita com registro de escolha do usuário
+  const handleSelectView = (viewId: SmartViewId) => {
+    hasUserSelectedViewRef.current = true;
+    setActiveView(viewId);
+  };
+
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [triageTask, setTriageTask] = useState<UITask | null>(null);
   const [quickInput, setQuickInput] = useState<string>('');
-  const [subtaskInput, setSubtaskInput] = useState<string>('');
   const [syncState, setSyncState] = useState<'synced' | 'syncing' | 'offline'>('synced');
+  const [recurrenceBanner, setRecurrenceBanner] = useState<string | null>(null);
+  const [dbError, setDbError] = useState<DatabaseErrorInfo | null>(null);
+
+  // Controle de Projetos GTD e Agrupamento
+  const [isNewProjectModalOpen, setIsNewProjectModalOpen] = useState<boolean>(false);
+  const [projectToDelete, setProjectToDelete] = useState<UIList | null>(null);
+  const [taskToDelete, setTaskToDelete] = useState<UITask | null>(null);
+  const [taskToComplete, setTaskToComplete] = useState<UITask | null>(null);
+  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState<boolean>(false);
+  const [isClearCompletedModalOpen, setIsClearCompletedModalOpen] = useState<boolean>(false);
+
+  // Helper unificado para contagem de tarefas pendentes ou concluídas por view
+  const getTaskCountForView = (viewId: string): number => {
+    return tasks.filter(
+      (t) =>
+        t.parentTaskId === null &&
+        (viewId === 'completed'
+          ? t.status === 'completed'
+          : t.status === 'pending' &&
+            (viewId === 'today'
+              ? t.dueDate !== null && t.dueDate <= Date.now() + 86_400_000
+              : viewId === 'next_7_days'
+              ? t.dueDate !== null
+              : t.listId === viewId))
+    ).length;
+  };
+
+  // Notificador unificado de erros de persistência ou rede no banco de dados
+  const reportDbError = (params: {
+    operation: string;
+    error: unknown;
+    customTitle?: string;
+    customMessage?: string;
+    onRetry?: () => Promise<void> | void;
+  }) => {
+    void NativeBridge.hapticError();
+    setSyncState('offline');
+    const isNet = isNetworkOrOfflineError(params.error);
+    const detailMsg =
+      params.error instanceof Error
+        ? params.error.message
+        : typeof params.error === 'string'
+        ? params.error
+        : 'Erro inesperado na comunicação com o banco de dados';
+
+    setDbError({
+      title:
+        params.customTitle ??
+        (isNet ? 'Sem Conexão com o Banco' : 'Erro no Banco de Dados'),
+      message:
+        params.customMessage ??
+        (isNet
+          ? 'Não foi possível sincronizar suas alterações devido à falta de conexão com a internet. Verifique sua rede e tente novamente.'
+          : 'Ocorreu um erro ao comunicar com o banco de dados. A alteração não pôde ser salva na nuvem.'),
+      operation: params.operation,
+      detail: detailMsg,
+      isNetworkError: isNet,
+      onRetry: params.onRetry,
+    });
+  };
+
+  // Carregamento de Listas e Tarefas direto do banco de dados
+  const loadData = async (isMounted = true) => {
+    try {
+      setIsLoading(true);
+      const [loadedLists, loadedTasks] = await Promise.all([
+        fetchListsFromDb(),
+        fetchTasksFromDb(),
+      ]);
+      if (isMounted) {
+        setLists(loadedLists);
+        setTasks(loadedTasks);
+        saveCache(loadedLists, loadedTasks);
+        setSyncState('synced');
+
+        // Se o usuário ainda não escolheu uma tela manualmente, abre 'today' se o inbox estiver vazio
+        if (!hasUserSelectedViewRef.current) {
+          const hasInboxTasks = loadedTasks.some(
+            (t) => t.parentTaskId === null && t.status === 'pending' && t.listId === 'inbox'
+          );
+          setActiveView(hasInboxTasks ? 'inbox' : 'today');
+        }
+      }
+    } catch (err) {
+      console.error('Erro ao conectar ao banco de dados:', err);
+      if (isMounted) {
+        setSyncState('offline');
+        reportDbError({
+          operation: 'Carregamento Inicial de Tarefas e Listas',
+          error: err,
+          customTitle: 'Falha ao Carregar Dados',
+          customMessage:
+            'Não foi possível carregar as tarefas e listas. Verifique sua conexão com a internet.',
+          onRetry: async () => {
+            await loadData(true);
+          },
+        });
+      }
+    } finally {
+      if (isMounted) {
+        setIsLoading(false);
+      }
+    }
+  };
+
+  // Mantém o cache local atualizado após mutações em memória
+  useEffect(() => {
+    if (lists.length > 0 || tasks.length > 0) {
+      saveCache(lists, tasks);
+    }
+  }, [lists, tasks]);
+
+  useEffect(() => {
+    let isMounted = true;
+    void loadData(isMounted);
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Monitora conectividade online/offline da rede
+  useEffect(() => {
+    const handleOnline = () => {
+      void syncEmbeddedReplica().then((res) => {
+        if (!res.offline) {
+          setSyncState('synced');
+        }
+      });
+    };
+    const handleOffline = () => {
+      setSyncState('offline');
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   // Inicializa listeners nativos do Capacitor (Teclado + StatusBar Dark)
   useEffect(() => {
@@ -467,10 +271,50 @@ export const TaskManagerApp: React.FC = () => {
     };
   }, []);
 
-  // Preview em tempo real do Parser NLP enquanto o usuário digita no Quick Capture
-  const liveParsed = useMemo(
-    () => parseQuickCaptureInput(quickInput),
-    [quickInput]
+  // Auto-oculta o banner de confirmação de próxima recorrência
+  useEffect(() => {
+    if (!recurrenceBanner) return;
+    const timer = window.setTimeout(() => setRecurrenceBanner(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [recurrenceBanner]);
+
+  // Fecha modais e drawer ao pressionar Escape
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (taskToComplete) {
+          setTaskToComplete(null);
+        } else if (taskToDelete) {
+          setTaskToDelete(null);
+        } else if (projectToDelete) {
+          setProjectToDelete(null);
+        } else if (isClearCompletedModalOpen) {
+          setIsClearCompletedModalOpen(false);
+        } else if (isMobileDrawerOpen) {
+          setIsMobileDrawerOpen(false);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    taskToComplete,
+    taskToDelete,
+    projectToDelete,
+    isClearCompletedModalOpen,
+    isMobileDrawerOpen,
+  ]);
+
+  // Opções customizadas para o CustomSelect de Listas
+  const listSelectOptions = useMemo<CustomSelectOption<string>[]>(
+    () =>
+      lists.map((l) => ({
+        value: l.id,
+        label: l.name,
+        dotColor: l.color,
+        description: l.isGtdSystem ? 'Lista do sistema GTD' : 'Projeto customizado',
+      })),
+    [lists]
   );
 
   // Filtra tarefas principais (sem parentTaskId) de acordo com a Smart List GTD ativa
@@ -484,11 +328,24 @@ export const TaskManagerApp: React.FC = () => {
     return tasks
       .filter((t) => t.parentTaskId === null)
       .filter((t) => {
+        if (activeView === 'calendar') {
+          return true;
+        }
+        if (activeView === 'projects') {
+          return false;
+        }
+        if (activeView === 'completed') {
+          return t.status === 'completed';
+        }
         if (activeView === 'today') {
           return (
-            t.dueDate !== null &&
-            t.dueDate <= endOfToday.getTime() &&
-            t.status === 'pending'
+            (t.dueDate !== null &&
+              t.dueDate <= endOfToday.getTime() &&
+              t.status === 'pending') ||
+            (t.status === 'completed' &&
+              t.completedAt !== null &&
+              t.completedAt >= startOfToday.getTime() &&
+              t.completedAt <= endOfToday.getTime())
           );
         }
         if (activeView === 'next_7_days') {
@@ -501,6 +358,11 @@ export const TaskManagerApp: React.FC = () => {
         return t.listId === activeView;
       })
       .sort((a, b) => {
+        if (activeView === 'completed') {
+          const timeA = a.completedAt ?? a.updatedAt;
+          const timeB = b.completedAt ?? b.updatedAt;
+          return timeB - timeA;
+        }
         // Pinned primeiro -> Pendentes antes de Concluídas -> Maior Prioridade -> Ordem
         if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
         if ((a.status === 'pending') !== (b.status === 'pending')) {
@@ -511,8 +373,262 @@ export const TaskManagerApp: React.FC = () => {
       });
   }, [tasks, activeView]);
 
+  // Separa tarefas pendentes e concluídas da visão ativa
+  const { pendingRootTasks, completedRootTasks } = useMemo(() => {
+    if (activeView === 'completed') {
+      return { pendingRootTasks: [], completedRootTasks: filteredRootTasks };
+    }
+    const pending: UITask[] = [];
+    const completed: UITask[] = [];
+    for (const t of filteredRootTasks) {
+      if (t.status === 'completed') {
+        completed.push(t);
+      } else {
+        pending.push(t);
+      }
+    }
+    return { pendingRootTasks: pending, completedRootTasks: completed };
+  }, [filteredRootTasks, activeView]);
+
+  // Estatísticas de saúde GTD dos Projetos (Weekly Review)
+  const projectStats = useMemo<ProjectStat[]>(() => {
+    const customProjects = lists.filter((l) => !l.isGtdSystem);
+    return customProjects.map((p) => {
+      const projTasks = tasks.filter(
+        (t) => t.listId === p.id && t.parentTaskId === null
+      );
+      const completedTasks = projTasks.filter(
+        (t) => t.status === 'completed'
+      ).length;
+      const pendingTasks = projTasks.filter(
+        (t) => t.status === 'pending'
+      ).length;
+      const totalTasks = projTasks.length;
+      const percentCompleted =
+        totalTasks > 0
+          ? Math.round((completedTasks / totalTasks) * 100)
+          : 0;
+      return {
+        id: p.id,
+        name: p.name,
+        color: p.color,
+        totalTasks,
+        completedTasks,
+        pendingTasks,
+        percentCompleted,
+      };
+    });
+  }, [lists, tasks]);
+
+  // Criar Novo Projeto GTD
+  const handleCreateProject = (name: string, color: string) => {
+    const cleanName = name.trim();
+    if (!cleanName) return;
+
+    const newProj: UIList = {
+      id: `proj-${Date.now()}`,
+      name: cleanName,
+      color: color,
+      icon: 'folder',
+      isGtdSystem: false,
+      sortOrder: lists.length + 1,
+    };
+
+    setLists((prev) => [...prev, newProj]);
+    setIsNewProjectModalOpen(false);
+    void NativeBridge.hapticSwipeAction();
+    setActiveView(newProj.id);
+
+    void createListInDb(newProj).catch((err: unknown) => {
+      console.error('Erro ao persistir novo projeto no Turso:', err);
+      reportDbError({
+        operation: `Criar Projeto "${newProj.name}"`,
+        error: err,
+        onRetry: async () => {
+          await createListInDb(newProj);
+        },
+      });
+    });
+  };
+
+  // Excluir Projeto GTD
+  const handleConfirmDeleteProject = () => {
+    if (!projectToDelete || projectToDelete.isGtdSystem) return;
+    const targetId = projectToDelete.id;
+
+    void NativeBridge.hapticLightImpact();
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.listId === targetId
+          ? { ...t, listId: 'inbox', updatedAt: Date.now() }
+          : t
+      )
+    );
+    setLists((prev) => prev.filter((l) => l.id !== targetId));
+    if (activeView === targetId) {
+      setActiveView('projects');
+    }
+    setProjectToDelete(null);
+
+    void deleteListInDb(targetId).catch((err: unknown) => {
+      console.error('Erro ao excluir projeto no Turso:', err);
+      reportDbError({
+        operation: 'Excluir Projeto',
+        error: err,
+        onRetry: async () => {
+          await deleteListInDb(targetId);
+        },
+      });
+    });
+  };
+
+  // Excluir Tarefa GTD
+  const handleConfirmDeleteTask = () => {
+    if (!taskToDelete) return;
+    const targetId = taskToDelete.id;
+
+    void NativeBridge.hapticLightImpact();
+    setTasks((prev) =>
+      prev.filter((t) => t.id !== targetId && t.parentTaskId !== targetId)
+    );
+
+    if (selectedTaskId === targetId) {
+      setSelectedTaskId(null);
+    }
+    if (triageTask?.id === targetId) {
+      setTriageTask(null);
+    }
+    if (taskToComplete?.id === targetId) {
+      setTaskToComplete(null);
+    }
+
+    if (taskToDelete.listId === 'inbox' && activeView === 'inbox') {
+      const remainingPendingInbox = tasks.filter(
+        (t) =>
+          t.parentTaskId === null &&
+          t.status === 'pending' &&
+          t.listId === 'inbox' &&
+          t.id !== targetId
+      ).length;
+      if (remainingPendingInbox === 0) {
+        setActiveView('today');
+        setRecurrenceBanner('Inbox zerado! Mostrando tarefas de Hoje.');
+      }
+    }
+
+    setTaskToDelete(null);
+
+    void deleteTaskInDb(targetId).catch((err: unknown) => {
+      console.error('Erro ao excluir tarefa no Turso:', err);
+      reportDbError({
+        operation: 'Excluir Tarefa',
+        error: err,
+        onRetry: async () => {
+          await deleteTaskInDb(targetId);
+        },
+      });
+    });
+  };
+
+  // Limpar todas as tarefas concluídas do sistema
+  const handleConfirmClearCompleted = () => {
+    void NativeBridge.hapticLightImpact();
+    const completedTasksList = tasks.filter((t) => t.status === 'completed');
+    const completedIds = completedTasksList.map((t) => t.id);
+
+    setTasks((prev) => prev.filter((t) => t.status !== 'completed'));
+    if (selectedTask && selectedTask.status === 'completed') {
+      setSelectedTaskId(null);
+    }
+    setIsClearCompletedModalOpen(false);
+
+    for (const id of completedIds) {
+      void deleteTaskInDb(id).catch((err) => {
+        console.error('Erro ao excluir tarefa concluída no Turso:', err);
+        reportDbError({
+          operation: 'Limpar Tarefas Concluídas',
+          error: err,
+          onRetry: async () => {
+            await Promise.all(completedIds.map((cId) => deleteTaskInDb(cId)));
+          },
+        });
+      });
+    }
+  };
+
+  // Excluir Subtarefa individualmente
+  const handleDeleteSubtask = (subtaskId: string) => {
+    void NativeBridge.hapticLightImpact();
+    setTasks((prev) => prev.filter((t) => t.id !== subtaskId));
+    void deleteTaskInDb(subtaskId).catch((err: unknown) => {
+      console.error('Erro ao excluir subtarefa no Turso:', err);
+      reportDbError({
+        operation: 'Excluir Subtarefa',
+        error: err,
+        onRetry: async () => {
+          await deleteTaskInDb(subtaskId);
+        },
+      });
+    });
+  };
+
+  // Promover Tarefa Multi-etapas da Inbox para Projeto GTD
+  const handlePromoteTaskToProject = (task: UITask) => {
+    void NativeBridge.hapticTaskComplete();
+    const newProjId = `proj-${Date.now()}`;
+    const newProj: UIList = {
+      id: newProjId,
+      name: task.title,
+      color: '#ec4899',
+      icon: 'folder',
+      isGtdSystem: false,
+      sortOrder: lists.length + 1,
+    };
+
+    setTasks((prev) =>
+      prev
+        .filter((t) => t.id !== task.id)
+        .map((t) =>
+          t.parentTaskId === task.id
+            ? { ...t, parentTaskId: null, listId: newProjId, updatedAt: Date.now() }
+            : t
+        )
+    );
+
+    setLists((prev) => [...prev, newProj]);
+    setTriageTask(null);
+    setSelectedTaskId(null);
+    setActiveView(newProjId);
+
+    void createListInDb(newProj).catch((err: unknown) => {
+      console.error('Erro ao promover tarefa a projeto no Turso:', err);
+      reportDbError({
+        operation: `Criar Projeto da Tarefa "${newProj.name}"`,
+        error: err,
+        onRetry: async () => {
+          await createListInDb(newProj);
+        },
+      });
+    });
+    void deleteTaskInDb(task.id).catch((err: unknown) => {
+      console.error('Erro ao remover tarefa promovida no Turso:', err);
+      reportDbError({
+        operation: 'Remover Tarefa Promovida a Projeto',
+        error: err,
+        onRetry: async () => {
+          await deleteTaskInDb(task.id);
+        },
+      });
+    });
+  };
+
   const selectedTask = useMemo(
     () => tasks.find((t) => t.id === selectedTaskId) ?? null,
+    [tasks, selectedTaskId]
+  );
+
+  const selectedTaskSubtasks = useMemo(
+    () => (selectedTaskId ? tasks.filter((s) => s.parentTaskId === selectedTaskId) : []),
     [tasks, selectedTaskId]
   );
 
@@ -529,9 +645,11 @@ export const TaskManagerApp: React.FC = () => {
     const finalTitle = parsed.cleanTitle || quickInput.trim();
     if (!finalTitle) return;
 
-    // Resolve ~lista informada no NLP ou usa a lista atual (padrão: Inbox)
     let resolvedListId =
-      activeView === 'today' || activeView === 'next_7_days'
+      activeView === 'today' ||
+      activeView === 'next_7_days' ||
+      activeView === 'calendar' ||
+      activeView === 'completed'
         ? 'inbox'
         : activeView;
 
@@ -547,7 +665,8 @@ export const TaskManagerApp: React.FC = () => {
     }
 
     const defaultDueDate =
-      parsed.dueDate ?? (activeView === 'today' ? Date.now() : null);
+      parsed.dueDate ??
+      (activeView === 'today' || activeView === 'calendar' ? Date.now() : null);
 
     const newTask: UITask = {
       id: `task-${Date.now()}`,
@@ -557,7 +676,8 @@ export const TaskManagerApp: React.FC = () => {
       priority: parsed.priority,
       isPinned: false,
       dueDate: defaultDueDate,
-      recurrenceRule: null,
+      recurrenceRule: parsed.recurrenceRule,
+      recurrenceMode: parsed.recurrenceMode,
       listId: resolvedListId,
       parentTaskId: null,
       tags: parsed.tags,
@@ -570,12 +690,69 @@ export const TaskManagerApp: React.FC = () => {
     setTasks((prev) => [newTask, ...prev]);
     setQuickInput('');
     void NativeBridge.hapticLightImpact();
+    void createTaskInDb(newTask).catch((err) => {
+      console.error('Erro ao salvar tarefa no Turso Cloud:', err);
+      reportDbError({
+        operation: `Salvar Tarefa "${newTask.title}"`,
+        error: err,
+        onRetry: async () => {
+          await createTaskInDb(newTask);
+        },
+      });
+    });
   };
 
-  // Alternar Status (Pending / Completed / Won't Do) com Haptics
-  const handleToggleStatus = (task: UITask, targetStatus?: TaskStatus) => {
-    const nextStatus: TaskStatus =
-      targetStatus ?? (task.status === 'completed' ? 'pending' : 'completed');
+  // Criar tarefa/evento diretamente de um dia do Calendário
+  const handleCreateTaskFromCalendar = (params: {
+    title: string;
+    dueDate: number;
+    recurrenceRule: string | null;
+    recurrenceMode: any;
+    tags: string[];
+    priority: TaskPriority;
+  }) => {
+    const targetListId =
+      activeView !== 'calendar' &&
+      activeView !== 'today' &&
+      activeView !== 'next_7_days'
+        ? activeView
+        : 'pessoal';
+
+    const newTask: UITask = {
+      id: `task-${Date.now()}`,
+      title: params.title,
+      description: '',
+      status: 'pending',
+      priority: params.priority,
+      isPinned: false,
+      dueDate: params.dueDate,
+      recurrenceRule: params.recurrenceRule,
+      recurrenceMode: params.recurrenceMode,
+      listId: listMap[targetListId] ? targetListId : 'inbox',
+      parentTaskId: null,
+      tags: params.tags,
+      sortOrder: tasks.length + 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      completedAt: null,
+    };
+
+    setTasks((prev) => [newTask, ...prev]);
+    void createTaskInDb(newTask).catch((err) => {
+      console.error('Erro ao salvar evento no Turso Cloud:', err);
+      reportDbError({
+        operation: `Criar Tarefa no Calendário "${newTask.title}"`,
+        error: err,
+        onRetry: async () => {
+          await createTaskInDb(newTask);
+        },
+      });
+    });
+  };
+
+  // Executar a transição de status de fato (Pending / Completed / Won't Do) + Repetições GTD
+  const executeToggleStatus = (task: UITask, nextStatus: TaskStatus) => {
+    const now = Date.now();
 
     if (nextStatus === 'completed') {
       void NativeBridge.hapticTaskComplete();
@@ -583,38 +760,177 @@ export const TaskManagerApp: React.FC = () => {
       void NativeBridge.hapticLightImpact();
     }
 
+    // Se a tarefa é recorrente e está sendo concluída agora:
+    if (
+      nextStatus === 'completed' &&
+      task.status !== 'completed' &&
+      task.recurrenceRule
+    ) {
+      const nextDueDate = calculateNextDueDate(
+        task.dueDate,
+        now,
+        task.recurrenceRule,
+        task.recurrenceMode
+      );
+
+      const nextOccurrenceTask: UITask = {
+        ...task,
+        id: `task-${now}-rec`,
+        status: 'pending',
+        dueDate: nextDueDate,
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+      };
+
+      const formattedNextDate = new Date(nextDueDate).toLocaleDateString('pt-BR', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      });
+
+      const modeDescription =
+        task.recurrenceMode === 'after_completion'
+          ? 'calculada a partir da conclusão de hoje'
+          : 'mantendo a data fixa do calendário';
+
+      setRecurrenceBanner(
+        `🔁 Próxima ocorrência de "${task.title}" agendada para ${formattedNextDate} (${modeDescription}).`
+      );
+
+      setTasks((prev) => [
+        nextOccurrenceTask,
+        ...prev.map((item) =>
+          item.id === task.id
+            ? {
+                ...item,
+                status: 'completed' as const,
+                completedAt: now,
+                updatedAt: now,
+              }
+            : item
+        ),
+      ]);
+
+      void createTaskInDb(nextOccurrenceTask).catch((err) => {
+        console.error('Erro ao salvar próxima ocorrência no Turso:', err);
+        reportDbError({
+          operation: 'Gerar Próxima Ocorrência Recorrente',
+          error: err,
+          onRetry: async () => {
+            await createTaskInDb(nextOccurrenceTask);
+          },
+        });
+      });
+      void updateTaskInDb(task.id, {
+        status: 'completed',
+        completedAt: now,
+      }).catch((err) => {
+        console.error('Erro ao concluir tarefa recorrente no Turso:', err);
+        reportDbError({
+          operation: 'Concluir Tarefa Recorrente',
+          error: err,
+          onRetry: async () => {
+            await updateTaskInDb(task.id, {
+              status: 'completed',
+              completedAt: now,
+            });
+          },
+        });
+      });
+      return;
+    }
+
+    const completedAt = nextStatus === 'completed' ? now : null;
+
     setTasks((prev) =>
       prev.map((item) =>
         item.id === task.id
           ? {
               ...item,
               status: nextStatus,
-              completedAt: nextStatus === 'completed' ? Date.now() : null,
-              updatedAt: Date.now(),
+              completedAt,
+              updatedAt: now,
             }
           : item
       )
     );
+
+    void updateTaskInDb(task.id, {
+      status: nextStatus,
+      completedAt,
+    }).catch((err) => {
+      console.error('Erro ao atualizar status no Turso Cloud:', err);
+      reportDbError({
+        operation: `Atualizar Status da Tarefa para "${nextStatus}"`,
+        error: err,
+        onRetry: async () => {
+          await updateTaskInDb(task.id, {
+            status: nextStatus,
+            completedAt,
+          });
+        },
+      });
+    });
+
+    // Se estava na visualização do Inbox e concluiu a última tarefa pendente do Inbox, redireciona para Hoje
+    if (activeView === 'inbox' && nextStatus === 'completed' && task.listId === 'inbox') {
+      const remainingPendingInbox = tasks.filter(
+        (t) =>
+          t.parentTaskId === null &&
+          t.status === 'pending' &&
+          t.listId === 'inbox' &&
+          t.id !== task.id
+      ).length;
+      if (remainingPendingInbox === 0) {
+        setTimeout(() => {
+          setActiveView('today');
+          setRecurrenceBanner('Inbox zerado! Mostrando tarefas de Hoje.');
+        }, 350);
+      }
+    }
   };
 
-  // Mudar Prioridade com Haptics
-  const handlePriorityChange = (taskId: string, priority: TaskPriority) => {
-    void NativeBridge.hapticLightImpact();
-    setTasks((prev) =>
-      prev.map((item) =>
-        item.id === taskId
-          ? { ...item, priority, updatedAt: Date.now() }
-          : item
-      )
-    );
+  // Alternar Status com confirmação para conclusão
+  const handleToggleStatus = (task: UITask, targetStatus?: TaskStatus) => {
+    const nextStatus: TaskStatus =
+      targetStatus ?? (task.status === 'completed' ? 'pending' : 'completed');
+
+    if (nextStatus === 'completed' && task.status !== 'completed') {
+      void NativeBridge.hapticLightImpact();
+      setTaskToComplete(task);
+      return;
+    }
+
+    executeToggleStatus(task, nextStatus);
   };
 
-  // Aplicar Triagem Rápida da Inbox (Mover Lista + Contexto @tag + Prioridade + Data)
-  const handleApplyTriage = (
+  // Confirmar conclusão de tarefa no modal
+  const handleConfirmCompleteTask = () => {
+    if (!taskToComplete) return;
+    const target = taskToComplete;
+    setTaskToComplete(null);
+    executeToggleStatus(target, 'completed');
+  };
+
+  // Atualizar propriedades da tarefa
+  const handleUpdateTask = async (
     taskId: string,
-    updates: Partial<Pick<UITask, 'listId' | 'priority' | 'tags' | 'dueDate'>>
-  ) => {
-    void NativeBridge.hapticSwipeAction();
+    updates: Partial<
+      Pick<
+        UITask,
+        | 'title'
+        | 'description'
+        | 'listId'
+        | 'priority'
+        | 'tags'
+        | 'dueDate'
+        | 'recurrenceRule'
+        | 'recurrenceMode'
+        | 'isPinned'
+      >
+    >
+  ): Promise<void> => {
     setTasks((prev) =>
       prev.map((item) =>
         item.id === taskId
@@ -622,11 +938,63 @@ export const TaskManagerApp: React.FC = () => {
           : item
       )
     );
+
+    try {
+      await updateTaskInDb(taskId, updates, updates.tags);
+    } catch (err) {
+      console.error('Erro ao atualizar tarefa no Turso Cloud:', err);
+      reportDbError({
+        operation: 'Atualizar Propriedades da Tarefa',
+        error: err,
+        onRetry: async () => {
+          await updateTaskInDb(taskId, updates, updates.tags);
+        },
+      });
+      throw err;
+    }
   };
 
-  // Adicionar Subtarefa (parent_task_id self-reference)
-  const handleAddSubtask = (parentTask: UITask) => {
-    const clean = subtaskInput.trim();
+  // Aplicar Triagem Rápida da Inbox
+  const handleApplyTriage = (
+    taskId: string,
+    updates: Partial<
+      Pick<
+        UITask,
+        | 'listId'
+        | 'priority'
+        | 'tags'
+        | 'dueDate'
+        | 'recurrenceRule'
+        | 'recurrenceMode'
+      >
+    >
+  ) => {
+    void NativeBridge.hapticSwipeAction();
+    handleUpdateTask(taskId, updates);
+
+    // Se moveu a última tarefa pendente da Inbox para outra lista, redireciona para Hoje
+    if (
+      activeView === 'inbox' &&
+      updates.listId &&
+      updates.listId !== 'inbox'
+    ) {
+      const remainingPendingInbox = tasks.filter(
+        (t) =>
+          t.parentTaskId === null &&
+          t.status === 'pending' &&
+          t.listId === 'inbox' &&
+          t.id !== taskId
+      ).length;
+      if (remainingPendingInbox === 0) {
+        setActiveView('today');
+        setRecurrenceBanner('Inbox zerado! Mostrando tarefas de Hoje.');
+      }
+    }
+  };
+
+  // Adicionar Subtarefa
+  const handleAddSubtask = (parentTask: UITask, title: string) => {
+    const clean = title.trim();
     if (!clean) return;
     const sub: UITask = {
       id: `sub-${Date.now()}`,
@@ -637,6 +1005,7 @@ export const TaskManagerApp: React.FC = () => {
       isPinned: false,
       dueDate: null,
       recurrenceRule: null,
+      recurrenceMode: 'fixed',
       listId: parentTask.listId,
       parentTaskId: parentTask.id,
       tags: [],
@@ -646,667 +1015,323 @@ export const TaskManagerApp: React.FC = () => {
       completedAt: null,
     };
     setTasks((prev) => [...prev, sub]);
-    setSubtaskInput('');
     void NativeBridge.hapticLightImpact();
+    void createTaskInDb(sub).catch((err) => {
+      console.error('Erro ao salvar subtarefa no Turso Cloud:', err);
+      reportDbError({
+        operation: `Criar Subtarefa "${sub.title}"`,
+        error: err,
+        onRetry: async () => {
+          await createTaskInDb(sub);
+        },
+      });
+    });
   };
 
   const handleManualSync = async () => {
     setSyncState('syncing');
     void NativeBridge.hapticLightImpact();
-    const res = await syncEmbeddedReplica();
-    setSyncState(res.offline ? 'offline' : 'synced');
+    try {
+      const res = await syncEmbeddedReplica();
+      if (res.offline) {
+        setSyncState('offline');
+        reportDbError({
+          operation: 'Sincronização',
+          error: new Error('Não foi possível conectar ao banco de dados.'),
+          customTitle: 'Falha na Sincronização',
+          customMessage:
+            'O banco de dados remoto não respondeu. Verifique sua conexão com a internet.',
+          onRetry: handleManualSync,
+        });
+      } else {
+        setSyncState('synced');
+        void NativeBridge.hapticSwipeAction();
+      }
+    } catch (err) {
+      setSyncState('offline');
+      reportDbError({
+        operation: 'Sincronização',
+        error: err,
+        customTitle: 'Erro ao Sincronizar',
+        onRetry: handleManualSync,
+      });
+    }
   };
 
   const activeViewTitle = useMemo(() => {
     if (activeView === 'today') return 'Hoje';
     if (activeView === 'next_7_days') return 'Próximos 7 Dias';
+    if (activeView === 'calendar') return 'Calendário & Eventos';
+    if (activeView === 'projects') return 'Lista de Projetos GTD';
+    if (activeView === 'completed') return 'Concluídas';
     return listMap[activeView]?.name ?? 'Inbox';
   }, [activeView, listMap]);
+
+  const currentCustomProject = useMemo(
+    () => lists.find((l) => !l.isGtdSystem && l.id === activeView) ?? null,
+    [lists, activeView]
+  );
+
+  const isShowingCalendar =
+    activeView === 'calendar' || viewLayout === 'calendar';
 
   return (
     <div
       onContextMenu={(e) => e.preventDefault()}
-      className="flex h-dvh w-screen overflow-hidden bg-zinc-950 text-zinc-100 select-none pt-safe pb-safe pl-safe pr-safe"
+      className="flex h-full w-full overflow-hidden bg-zinc-950 text-zinc-100 select-none"
     >
-      {/* =====================================================================
-          SIDEBAR RETRÁTIL (Web / Desktop / Tablet)
-         ===================================================================== */}
-      <aside
-        className={`hidden md:flex flex-col border-r border-zinc-800/80 bg-zinc-900/50 transition-all duration-200 shrink-0 ${
-          sidebarOpen ? 'w-64' : 'w-16'
-        }`}
-      >
-        <div className="flex items-center justify-between px-4 h-14 border-b border-zinc-800/80">
-          {sidebarOpen && (
-            <div className="flex items-center gap-2.5">
-              <img
-                src="/icon.svg"
-                alt="GTD Flow"
-                className="w-5 h-5 rounded-md shrink-0"
-              />
-              <span className="font-bold tracking-tight text-sm">
-                Meu GTD
-              </span>
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={() => setSidebarOpen((v) => !v)}
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800"
-            title="Alternar Sidebar"
-          >
-            {sidebarOpen ? (
-              <PanelLeftClose className="w-4 h-4" />
-            ) : (
-              <PanelLeftOpen className="w-4 h-4" />
-            )}
-          </button>
-        </div>
+      {/* Sidebar Retrátil Desktop */}
+      <Sidebar
+        sidebarOpen={sidebarOpen}
+        onToggleSidebar={() => setSidebarOpen((v) => !v)}
+        activeView={activeView}
+        onSelectView={handleSelectView}
+        lists={lists}
+        syncState={syncState}
+        onSync={() => void handleManualSync()}
+        onCreateProject={() => setIsNewProjectModalOpen(true)}
+        getTaskCountForView={getTaskCountForView}
+      />
 
-        <nav className="flex-1 native-scroll-container p-2 space-y-1">
-          {[
-            { id: 'inbox', label: 'Inbox', icon: Inbox, color: 'text-blue-400' },
-            { id: 'today', label: 'Hoje', icon: Calendar, color: 'text-emerald-400' },
-            {
-              id: 'next_7_days',
-              label: 'Próximos 7 Dias',
-              icon: CalendarDays,
-              color: 'text-indigo-400',
-            },
-            {
-              id: 'next_actions',
-              label: 'Ações Seguintes',
-              icon: Zap,
-              color: 'text-amber-400',
-            },
-            {
-              id: 'waiting_for',
-              label: 'Aguardando',
-              icon: Clock,
-              color: 'text-orange-400',
-            },
-            {
-              id: 'someday',
-              label: 'Algum Dia',
-              icon: Sparkles,
-              color: 'text-purple-400',
-            },
-          ].map((item) => {
-            const Icon = item.icon;
-            const isActive = activeView === item.id;
-            const count = tasks.filter(
-              (t) =>
-                t.parentTaskId === null &&
-                t.status === 'pending' &&
-                (item.id === 'today'
-                  ? t.dueDate !== null && t.dueDate <= Date.now() + 86_400_000
-                  : item.id === 'next_7_days'
-                  ? t.dueDate !== null
-                  : t.listId === item.id)
-            ).length;
+      {/* Menu Lateral Mobile Drawer */}
+      <MobileDrawer
+        isOpen={isMobileDrawerOpen}
+        onClose={() => setIsMobileDrawerOpen(false)}
+        activeView={activeView}
+        onSelectView={handleSelectView}
+        lists={lists}
+        syncState={syncState}
+        onSync={() => void handleManualSync()}
+        onCreateProject={() => setIsNewProjectModalOpen(true)}
+        getTaskCountForView={getTaskCountForView}
+      />
 
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  void NativeBridge.hapticLightImpact();
-                  setActiveView(item.id);
-                }}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-medium transition-colors ${
-                  isActive
-                    ? 'bg-zinc-800 text-zinc-100'
-                    : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
-                }`}
-              >
-                <Icon className={`w-4 h-4 shrink-0 ${item.color}`} />
-                {sidebarOpen && (
-                  <>
-                    <span className="truncate flex-1 text-left">{item.label}</span>
-                    {count > 0 && (
-                      <span className="text-[11px] text-zinc-400 font-semibold">
-                        {count}
-                      </span>
-                    )}
-                  </>
-                )}
-              </button>
-            );
-          })}
-
-          {sidebarOpen && (
-            <div className="pt-4 pb-1 px-3 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-              Projetos GTD
-            </div>
-          )}
-
-          {lists
-            .filter((l) => !l.isGtdSystem)
-            .map((project) => (
-              <button
-                key={project.id}
-                type="button"
-                onClick={() => {
-                  void NativeBridge.hapticLightImpact();
-                  setActiveView(project.id);
-                }}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                  activeView === project.id
-                    ? 'bg-zinc-800 text-zinc-100'
-                    : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
-                }`}
-              >
-                <FolderKanban
-                  className="w-4 h-4 shrink-0"
-                  style={{ color: project.color }}
-                />
-                {sidebarOpen && (
-                  <span className="truncate flex-1 text-left">{project.name}</span>
-                )}
-              </button>
-            ))}
-        </nav>
-
-        {/* Status do Turso Embedded Replica */}
-        <div className="p-3 border-t border-zinc-800/80">
-          <button
-            type="button"
+      {/* Área Principal */}
+      <main className="flex-1 flex flex-col min-w-0 h-full relative overflow-hidden">
+        {/* Banner de Aviso quando Offline */}
+        {syncState === 'offline' && (
+          <div
             onClick={() => void handleManualSync()}
-            className="w-full flex items-center justify-center gap-2 px-2.5 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-[11px] text-zinc-400 border border-zinc-800"
+            className="px-4 py-2 bg-amber-500/10 hover:bg-amber-500/15 border-b border-amber-500/20 text-amber-300 text-xs flex items-center justify-between gap-2 cursor-pointer transition-colors"
           >
-            <RefreshCw
-              className={`w-3.5 h-3.5 ${
-                syncState === 'syncing' ? 'animate-spin text-indigo-400' : 'text-emerald-400'
-              }`}
-            />
-            {sidebarOpen && (
-              <span>
-                Turso Replica: {syncState === 'offline' ? 'Local Offline' : '0ms Sync'}
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+              <span className="truncate">
+                <strong>Modo Offline:</strong> Falha de conexão com o banco. As alterações podem não estar sincronizadas.
               </span>
-            )}
-          </button>
-        </div>
-      </aside>
-
-      {/* =====================================================================
-          ÁREA PRINCIPAL: SMART LIST HEADER + LISTA DE TAREFAS + QUICK CAPTURE
-         ===================================================================== */}
-      <main className="flex-1 flex flex-col min-w-0 h-full relative">
-        {/* Cabeçalho e Pílulas Horizontais de Smart Lists no Mobile */}
-        <header className="px-4 pt-3 pb-2 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur-md">
-          <div className="flex items-center justify-between mb-2.5">
-            <div>
-              <h1 className="text-lg font-bold tracking-tight text-zinc-100">
-                {activeViewTitle}
-              </h1>
-              <p className="text-[11px] text-zinc-400">
-                Swipe direita para concluir • Swipe esquerda para triagem GTD
-              </p>
             </div>
-
-            {activeView === 'inbox' && filteredRootTasks.length > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  const firstPending = filteredRootTasks.find(
-                    (t) => t.status === 'pending'
-                  );
-                  if (firstPending) setTriageTask(firstPending);
-                }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 border border-indigo-500/40 text-indigo-300 text-xs font-medium active:scale-95 transition-transform"
-              >
-                <ArrowRightLeft className="w-3.5 h-3.5" />
-                <span>Triar Inbox</span>
-              </button>
-            )}
+            <span className="text-[11px] font-semibold underline shrink-0 hover:text-amber-200">
+              Reconectar
+            </span>
           </div>
+        )}
 
-          {/* Navegação rápida de Smart Lists GTD no Mobile */}
-          <div className="flex md:hidden items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
-            {[
-              { id: 'inbox', label: 'Inbox' },
-              { id: 'today', label: 'Hoje' },
-              { id: 'next_7_days', label: '7 Dias' },
-              { id: 'next_actions', label: 'Ações Seguintes' },
-              { id: 'waiting_for', label: 'Aguardando' },
-              { id: 'someday', label: 'Algum Dia' },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => {
-                  void NativeBridge.hapticLightImpact();
-                  setActiveView(tab.id);
-                }}
-                className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors ${
-                  activeView === tab.id
-                    ? 'bg-zinc-100 text-zinc-950'
-                    : 'bg-zinc-900 text-zinc-400 border border-zinc-800'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
+        {/* Cabeçalho */}
+        <MainHeader
+          activeView={activeView}
+          activeViewTitle={activeViewTitle}
+          isShowingCalendar={isShowingCalendar}
+          viewLayout={viewLayout}
+          onSetViewLayout={setViewLayout}
+          onOpenMobileDrawer={() => setIsMobileDrawerOpen(true)}
+          onOpenTriage={() => {
+            const firstPending = filteredRootTasks.find((t) => t.status === 'pending');
+            if (firstPending) setTriageTask(firstPending);
+          }}
+          hasInboxTasks={filteredRootTasks.length > 0}
+          completedCount={completedRootTasks.length}
+          onClearCompleted={() => setIsClearCompletedModalOpen(true)}
+          currentCustomProject={currentCustomProject}
+          onDeleteCustomProject={() => setProjectToDelete(currentCustomProject)}
+        />
+
+        {/* Banner de Confirmação de Recorrência Gerada */}
+        {recurrenceBanner && (
+          <div className="mx-4 mt-2.5 px-3.5 py-2 rounded-xl bg-indigo-600/20 border border-indigo-500/40 text-indigo-200 text-xs flex items-center justify-between gap-2">
+            <span>{recurrenceBanner}</span>
+            <button
+              type="button"
+              aria-label="Fechar aviso"
+              onClick={() => setRecurrenceBanner(null)}
+              className="p-1 rounded-lg hover:bg-indigo-500/20 text-indigo-300"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
-        </header>
+        )}
 
-        {/* Lista de Tarefas com Scroll Isolado (native-scroll-container) */}
-        <section className="flex-1 native-scroll-container px-4 py-3 pb-28">
-          {filteredRootTasks.length === 0 ? (
+        {/* Conteúdo Central */}
+        <section className="flex-1 min-h-0 native-scroll-container px-4 py-3 pb-4">
+          {isLoading ? (
             <div className="h-64 flex flex-col items-center justify-center text-center px-6">
-              <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-3 text-zinc-500">
-                <Check className="w-6 h-6" />
-              </div>
-              <p className="text-sm font-medium text-zinc-300">
-                Mente clara como água (Mind Like Water)
-              </p>
-              <p className="text-xs text-zinc-500 mt-1 max-w-xs">
-                Use a barra rápida abaixo com <code className="text-zinc-300">!alta</code>,{' '}
-                <code className="text-zinc-300">@computador</code>,{' '}
-                <code className="text-zinc-300">~trabalho</code> ou{' '}
-                <code className="text-zinc-300">amanhã</code>.
-              </p>
+              <RefreshCw className="w-8 h-8 text-indigo-400 animate-spin mb-3" />
+              <p className="text-xs text-zinc-400">Carregando...</p>
             </div>
+          ) : isShowingCalendar ? (
+            <CalendarView
+              tasks={tasks}
+              listMap={listMap}
+              selectedTaskId={selectedTaskId}
+              onSelectTask={(t) => setSelectedTaskId(t.id)}
+              onToggleStatus={handleToggleStatus}
+              onOpenTriage={(t) => setTriageTask(t)}
+              onDeleteTask={(t) => setTaskToDelete(t as UITask)}
+              onCreateTaskOnDate={handleCreateTaskFromCalendar}
+            />
+          ) : activeView === 'projects' ? (
+            <ProjectsHub
+              projectStats={projectStats}
+              onSelectView={handleSelectView}
+              onAddAction={(name) => setQuickInput(`~"${name}" `)}
+              onDeleteProject={(p) => {
+                const target = lists.find((l) => l.id === p.id);
+                if (target) setProjectToDelete(target);
+              }}
+              onCreateProject={() => setIsNewProjectModalOpen(true)}
+            />
           ) : (
-            filteredRootTasks.map((task) => {
-              const subtasks = tasks.filter((s) => s.parentTaskId === task.id);
-              const listName = listMap[task.listId]?.name ?? 'Inbox';
-              return (
-                <SwipeableTaskRow
-                  key={task.id}
-                  task={task}
-                  subtasks={subtasks}
-                  listName={listName}
-                  isSelected={selectedTaskId === task.id}
-                  onSelect={(t) => setSelectedTaskId(t.id)}
-                  onToggleStatus={handleToggleStatus}
-                  onOpenTriage={(t) => setTriageTask(t)}
-                />
-              );
-            })
+            <TaskList
+              activeView={activeView}
+              pendingTasks={pendingRootTasks}
+              completedTasks={completedRootTasks}
+              allTasks={tasks}
+              listMap={listMap}
+              selectedTaskId={selectedTaskId}
+              onSelectTask={(t) => setSelectedTaskId(t.id)}
+              onToggleStatus={handleToggleStatus}
+              onOpenTriage={(t) => setTriageTask(t)}
+              onDeleteTask={(t) => setTaskToDelete(t)}
+              onGoToToday={() => handleSelectView('today')}
+              todayCount={getTaskCountForView('today')}
+            />
           )}
         </section>
 
-        {/* ===================================================================
-            BARRA DE QUICK CAPTURE COM PARSER NLP EM TEMPO REAL (Keyboard Aware)
-           =================================================================== */}
-        <div className="bottom-keyboard-aware sticky bottom-0 left-0 right-0 px-4 pb-3 pt-2 bg-gradient-to-t from-zinc-950 via-zinc-950/95 to-transparent">
-          {/* Pílulas de Preview dos Metadados Detectados pelo Parser NLP */}
-          {quickInput.trim().length > 0 &&
-            (liveParsed.priority > 0 ||
-              liveParsed.tags.length > 0 ||
-              liveParsed.targetListQuery !== null ||
-              liveParsed.detectedDateLabel !== null) && (
-              <div className="flex flex-wrap items-center gap-1.5 mb-2 px-1">
-                {liveParsed.priority > 0 && (
-                  <span
-                    className={`text-[11px] px-2 py-0.5 rounded-full border font-medium flex items-center gap-1 ${
-                      PRIORITY_META[liveParsed.priority].badgeClass
-                    }`}
-                  >
-                    <Flag className="w-3 h-3" />
-                    Prioridade {PRIORITY_META[liveParsed.priority].label}
-                  </span>
-                )}
-                {liveParsed.targetListQuery && (
-                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-pink-500/15 text-pink-300 border border-pink-500/30 font-medium">
-                    ~{liveParsed.targetListQuery}
-                  </span>
-                )}
-                {liveParsed.tags.map((t) => (
-                  <span
-                    key={t}
-                    className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-medium"
-                  >
-                    {t}
-                  </span>
-                ))}
-                {liveParsed.detectedDateLabel && (
-                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-medium">
-                    📅 {liveParsed.detectedDateLabel}
-                  </span>
-                )}
-              </div>
-            )}
-
-          <form
-            onSubmit={handleQuickAddSubmit}
-            className="flex items-center gap-2 bg-zinc-900 border border-zinc-700/80 focus-within:border-indigo-500 rounded-2xl px-3.5 py-2.5 shadow-2xl"
-          >
-            <Plus className="w-5 h-5 text-zinc-400 shrink-0" />
-            <input
-              type="text"
-              value={quickInput}
-              onChange={(e) => setQuickInput(e.target.value)}
-              placeholder='Adicionar tarefa... ex: "Ligar p/ cliente !alta @telefone ~aguardando amanhã"'
-              className="flex-1 bg-transparent text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none"
-            />
-            <button
-              type="submit"
-              disabled={!quickInput.trim()}
-              className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs font-semibold text-white transition-all active:scale-95"
-            >
-              Capturar
-            </button>
-          </form>
-        </div>
+        {/* Barra de Captura Rápida (Quick Capture) */}
+        <QuickCaptureBar
+          value={quickInput}
+          onChange={setQuickInput}
+          onSubmit={handleQuickAddSubmit}
+          activeView={activeView}
+        />
       </main>
 
-      {/* =====================================================================
-          PAINEL DE DETALHES DA TAREFA:
-          - Desktop: Painel Lateral Direito
-          - Mobile: Bottom Sheet Deslizante Nativo
-         ===================================================================== */}
-      {selectedTask && (
-        <div
-          className="fixed inset-0 z-40 md:static md:inset-auto md:z-auto flex items-end md:items-stretch bg-black/60 md:bg-transparent backdrop-blur-xs md:backdrop-blur-none"
-          onClick={() => setSelectedTaskId(null)}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full md:w-96 max-h-[85dvh] md:max-h-none bg-zinc-900 md:border-l border-t md:border-t-0 border-zinc-800 rounded-t-3xl md:rounded-none flex flex-col overflow-hidden shadow-2xl"
-          >
-            {/* Alça Nativa do Bottom Sheet no Mobile */}
-            <div className="md:hidden flex justify-center pt-2.5 pb-1">
-              <div className="w-10 h-1.5 rounded-full bg-zinc-700" />
-            </div>
+      {/* Painel Lateral / Bottom Sheet de Detalhes da Tarefa */}
+      <TaskDetailSheet
+        selectedTask={selectedTask}
+        onClose={() => setSelectedTaskId(null)}
+        listMap={listMap}
+        listSelectOptions={listSelectOptions}
+        subtasks={selectedTaskSubtasks}
+        onUpdateTask={handleUpdateTask}
+        onToggleStatus={handleToggleStatus}
+        onDeleteTask={(t) => setTaskToDelete(t)}
+        onAddSubtask={handleAddSubtask}
+        onDeleteSubtask={handleDeleteSubtask}
+      />
 
-            {/* Header do Detalhe */}
-            <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-zinc-400">
-                  {listMap[selectedTask.listId]?.name ?? 'Inbox'}
-                </span>
-                <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />
-                <span className="text-xs text-zinc-500">Detalhes GTD</span>
-              </div>
+      {/* Bottom Sheet de Triagem Rápida da Inbox */}
+      <TriageSheet
+        triageTask={triageTask}
+        onClose={() => setTriageTask(null)}
+        listSelectOptions={listSelectOptions}
+        onApplyTriage={handleApplyTriage}
+        onPromoteToProject={handlePromoteTaskToProject}
+        onDeleteTask={(t) => setTaskToDelete(t)}
+        setTriageTask={setTriageTask}
+      />
 
-              <div className="flex items-center gap-1">
-                {/* Botão Won't Do (Não Farei) */}
-                <button
-                  type="button"
-                  title="Marcar como 'Não farei' (Won't Do)"
-                  onClick={() =>
-                    handleToggleStatus(
-                      selectedTask,
-                      selectedTask.status === 'wont_do' ? 'pending' : 'wont_do'
-                    )
-                  }
-                  className={`px-2 py-1 rounded-lg text-[11px] font-medium flex items-center gap-1 border transition-colors ${
-                    selectedTask.status === 'wont_do'
-                      ? 'bg-zinc-700 text-zinc-100 border-zinc-600'
-                      : 'bg-zinc-800/70 text-zinc-400 border-zinc-700/60 hover:text-zinc-200'
-                  }`}
-                >
-                  <Ban className="w-3 h-3" />
-                  <span>Won&apos;t Do</span>
-                </button>
+      {/* Modal de Criação de Projeto GTD */}
+      <NewProjectModal
+        isOpen={isNewProjectModalOpen}
+        onClose={() => setIsNewProjectModalOpen(false)}
+        onCreate={handleCreateProject}
+      />
 
-                <button
-                  type="button"
-                  onClick={() => setSelectedTaskId(null)}
-                  className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
+      {/* Modal de Confirmação de Exclusão de Projeto */}
+      <ConfirmModal
+        isOpen={Boolean(projectToDelete)}
+        onClose={() => setProjectToDelete(null)}
+        onConfirm={handleConfirmDeleteProject}
+        icon={<Trash2 className="w-5 h-5" />}
+        title="Excluir Projeto GTD?"
+        subtitle={projectToDelete?.name}
+        description="O projeto será removido. Todas as tarefas pertencentes a ele serão mantidas com segurança e movidas para a sua Inbox."
+        confirmLabel="Excluir Projeto"
+        confirmClass="bg-red-600 hover:bg-red-500"
+      />
 
-            {/* Corpo do Detalhe */}
-            <div className="flex-1 native-scroll-container p-4 space-y-4">
-              <div>
-                <h2 className="text-base font-semibold text-zinc-100">
-                  {selectedTask.title}
-                </h2>
-                <textarea
-                  rows={3}
-                  value={selectedTask.description}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setTasks((prev) =>
-                      prev.map((item) =>
-                        item.id === selectedTask.id
-                          ? { ...item, description: val, updatedAt: Date.now() }
-                          : item
-                      )
-                    );
-                  }}
-                  placeholder="Notas em Markdown, passos da ação ou link de referência..."
-                  className="w-full mt-2 bg-zinc-950/70 border border-zinc-800 rounded-xl p-2.5 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
-                />
-              </div>
+      {/* Modal de Confirmação de Conclusão de Tarefa */}
+      <ConfirmModal
+        isOpen={Boolean(taskToComplete)}
+        onClose={() => setTaskToComplete(null)}
+        onConfirm={handleConfirmCompleteTask}
+        icon={<CheckCircle2 className="w-5 h-5" />}
+        iconBgClass="bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
+        title="Concluir Tarefa?"
+        subtitle={taskToComplete?.title}
+        description={(() => {
+          if (!taskToComplete) return '';
+          const pendingSubtasks = tasks.filter(
+            (t) => t.parentTaskId === taskToComplete.id && t.status === 'pending'
+          ).length;
+          if (pendingSubtasks > 0) {
+            return `Esta tarefa possui ${pendingSubtasks} subtarefa(s) ainda pendente(s). Deseja marcá-la como concluída mesmo assim?`;
+          }
+          if (taskToComplete.recurrenceRule) {
+            return 'Esta tarefa é recorrente. Ao confirmar a conclusão, a próxima ocorrência será gerada e agendada automaticamente.';
+          }
+          if (taskToComplete.parentTaskId !== null) {
+            return 'Deseja confirmar a conclusão desta subtarefa?';
+          }
+          return 'Deseja confirmar a conclusão desta tarefa?';
+        })()}
+        confirmLabel="Concluir"
+        confirmClass="bg-emerald-600 hover:bg-emerald-500"
+      />
 
-              {/* Seletor de Prioridade com Haptics */}
-              <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-                  Prioridade (TickTick Color)
-                </label>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {([0, 1, 2, 3] as TaskPriority[]).map((p) => (
-                    <button
-                      key={p}
-                      type="button"
-                      onClick={() => handlePriorityChange(selectedTask.id, p)}
-                      className={`py-1.5 px-2 rounded-lg text-xs font-medium border flex items-center justify-center gap-1.5 transition-all ${
-                        selectedTask.priority === p
-                          ? PRIORITY_META[p].badgeClass
-                          : 'border-zinc-800 bg-zinc-950/50 text-zinc-400'
-                      }`}
-                    >
-                      <span
-                        className={`w-2 h-2 rounded-full ${PRIORITY_META[p].dotClass}`}
-                      />
-                      <span>{PRIORITY_META[p].label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
+      {/* Modal de Confirmação de Exclusão de Tarefa */}
+      <ConfirmModal
+        isOpen={Boolean(taskToDelete)}
+        onClose={() => setTaskToDelete(null)}
+        onConfirm={handleConfirmDeleteTask}
+        icon={<Trash2 className="w-5 h-5" />}
+        title="Excluir Tarefa?"
+        subtitle={taskToDelete?.title}
+        description={(() => {
+          if (!taskToDelete) return '';
+          const childCount = tasks.filter(
+            (t) => t.parentTaskId === taskToDelete.id
+          ).length;
+          if (childCount > 0) {
+            return `Esta tarefa e suas ${childCount} subtarefa(s) vinculadas serão removidas permanentemente.`;
+          }
+          if (taskToDelete.recurrenceRule) {
+            return 'Esta tarefa recorrente e suas configurações de repetição serão removidas permanentemente.';
+          }
+          return 'Tem certeza que deseja excluir esta tarefa? Esta ação não pode ser desfeita.';
+        })()}
+        confirmLabel="Excluir Tarefa"
+        confirmClass="bg-red-600 hover:bg-red-500"
+      />
 
-              {/* Subtarefas / Checklists (parent_task_id) */}
-              <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-                  Subtarefas / Checklist
-                </label>
-                <div className="space-y-1.5 mb-2">
-                  {tasks
-                    .filter((s) => s.parentTaskId === selectedTask.id)
-                    .map((sub) => (
-                      <div
-                        key={sub.id}
-                        onClick={() => handleToggleStatus(sub)}
-                        className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg bg-zinc-950/60 border border-zinc-800/80 cursor-pointer"
-                      >
-                        <div
-                          className={`w-4 h-4 rounded border flex items-center justify-center ${
-                            sub.status === 'completed'
-                              ? 'bg-emerald-500 border-emerald-500 text-zinc-950'
-                              : 'border-zinc-600'
-                          }`}
-                        >
-                          {sub.status === 'completed' && (
-                            <Check className="w-3 h-3 stroke-[3]" />
-                          )}
-                        </div>
-                        <span
-                          className={`text-xs ${
-                            sub.status === 'completed'
-                              ? 'line-through text-zinc-500'
-                              : 'text-zinc-200'
-                          }`}
-                        >
-                          {sub.title}
-                        </span>
-                      </div>
-                    ))}
-                </div>
+      {/* Modal de Confirmação de Limpeza de Concluídas */}
+      <ConfirmModal
+        isOpen={isClearCompletedModalOpen}
+        onClose={() => setIsClearCompletedModalOpen(false)}
+        onConfirm={handleConfirmClearCompleted}
+        icon={<Trash2 className="w-5 h-5" />}
+        title="Limpar Todas as Concluídas?"
+        description="Deseja remover permanentemente todas as tarefas finalizadas do histórico? Esta operação não pode ser desfeita."
+        confirmLabel="Limpar Tudo"
+        confirmClass="bg-red-600 hover:bg-red-500"
+      />
 
-                <div className="flex gap-1.5">
-                  <input
-                    type="text"
-                    value={subtaskInput}
-                    onChange={(e) => setSubtaskInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        handleAddSubtask(selectedTask);
-                      }
-                    }}
-                    placeholder="Adicionar passo da subtarefa..."
-                    className="flex-1 bg-zinc-950/70 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => handleAddSubtask(selectedTask)}
-                    className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium"
-                  >
-                    + Passo
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* =====================================================================
-          BOTTOM SHEET DE TRIAGEM RÁPIDA DA INBOX (Mover Lista + @Contexto + Prioridade)
-         ===================================================================== */}
-      {triageTask && (
-        <div
-          className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/70 backdrop-blur-xs"
-          onClick={() => setTriageTask(null)}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md bg-zinc-900 border-t md:border border-zinc-800 rounded-t-3xl md:rounded-2xl p-5 space-y-4 shadow-2xl"
-          >
-            <div className="md:hidden flex justify-center -mt-2 mb-1">
-              <div className="w-10 h-1.5 rounded-full bg-zinc-700" />
-            </div>
-
-            <div className="flex items-start justify-between">
-              <div>
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-indigo-400">
-                  Triagem GTD (Clarificar & Organizar)
-                </span>
-                <h3 className="text-sm font-bold text-zinc-100 mt-0.5">
-                  {triageTask.title}
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setTriageTask(null)}
-                className="p-1 text-zinc-400 hover:text-zinc-100"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* 1. Destino GTD / Lista de Projeto */}
-            <div>
-              <label className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-                1. Mover para Lista / Destino GTD
-              </label>
-              <div className="grid grid-cols-2 gap-1.5">
-                {lists.map((l) => (
-                  <button
-                    key={l.id}
-                    type="button"
-                    onClick={() => {
-                      handleApplyTriage(triageTask.id, { listId: l.id });
-                      setTriageTask((prev) =>
-                        prev ? { ...prev, listId: l.id } : null
-                      );
-                    }}
-                    className={`px-3 py-2 rounded-xl text-xs font-medium border text-left flex items-center gap-2 ${
-                      triageTask.listId === l.id
-                        ? 'bg-indigo-600/20 border-indigo-500 text-indigo-200'
-                        : 'bg-zinc-950/60 border-zinc-800 text-zinc-300'
-                    }`}
-                  >
-                    <span
-                      className="w-2 h-2 rounded-full shrink-0"
-                      style={{ backgroundColor: l.color }}
-                    />
-                    <span className="truncate">{l.name}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* 2. Contexto GTD (@computador, @rua, #energia_baixa) */}
-            <div>
-              <label className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-                2. Contexto GTD & Energia (@tag)
-              </label>
-              <div className="flex flex-wrap gap-1.5">
-                {GTD_CONTEXT_SUGGESTIONS.map((ctx) => {
-                  const active = triageTask.tags.includes(ctx);
-                  return (
-                    <button
-                      key={ctx}
-                      type="button"
-                      onClick={() => {
-                        const nextTags = active
-                          ? triageTask.tags.filter((t) => t !== ctx)
-                          : [...triageTask.tags, ctx];
-                        handleApplyTriage(triageTask.id, { tags: nextTags });
-                        setTriageTask((prev) =>
-                          prev ? { ...prev, tags: nextTags } : null
-                        );
-                      }}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium border flex items-center gap-1 ${
-                        active
-                          ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
-                          : 'bg-zinc-950/60 border-zinc-800 text-zinc-400'
-                      }`}
-                    >
-                      <Tag className="w-3 h-3" />
-                      <span>{ctx}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* 3. Prioridade */}
-            <div>
-              <label className="block text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-                3. Definir Prioridade
-              </label>
-              <div className="grid grid-cols-4 gap-1.5">
-                {([0, 1, 2, 3] as TaskPriority[]).map((p) => (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => {
-                      handleApplyTriage(triageTask.id, { priority: p });
-                      setTriageTask((prev) =>
-                        prev ? { ...prev, priority: p } : null
-                      );
-                    }}
-                    className={`py-1.5 rounded-lg text-xs font-medium border ${
-                      triageTask.priority === p
-                        ? PRIORITY_META[p].badgeClass
-                        : 'bg-zinc-950/60 border-zinc-800 text-zinc-400'
-                    }`}
-                  >
-                    {PRIORITY_META[p].label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setTriageTask(null)}
-              className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white"
-            >
-              Concluir Triagem
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Modal de Erro de Banco de Dados */}
+      <DatabaseErrorModal
+        error={dbError}
+        onClose={() => setDbError(null)}
+      />
     </div>
   );
 };

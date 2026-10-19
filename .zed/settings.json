@@ -1,0 +1,9 @@
+{
+  "gutter": {
+    "line_numbers": true
+  },
+  "line_indicator_format": "long",
+  "status_bar": {
+    "cursor_position_button": true
+  }
+}
