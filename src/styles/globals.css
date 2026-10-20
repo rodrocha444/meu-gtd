@@ -113,12 +113,23 @@ body {
   padding-right: var(--safe-right);
 }
 
+/* Barra de captura rápida (QuickCapture) adaptativa para PWA e iOS Nativo */
 .bottom-keyboard-aware {
-  padding-bottom: 0 !important;
-  margin-bottom: 0 !important;
+  padding-bottom: var(--safe-bottom, 0px);
+  margin-bottom: 0;
+  transition: padding-bottom 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* No app nativo iOS (ou com safe-area ativa no dispositivo), afasta da borda inferior e do Home Indicator */
+html.platform-ios .bottom-keyboard-aware,
+body.platform-ios .bottom-keyboard-aware,
+html.is-native .bottom-keyboard-aware,
+body.is-native .bottom-keyboard-aware {
+  padding-bottom: max(1rem, calc(var(--safe-bottom, 0px) + 0.375rem));
+}
+
+/* Quando o teclado nativo ou virtual abre, remove o safe-area para encostar suavemente no topo do teclado */
 body.keyboard-open .bottom-keyboard-aware {
-  padding-bottom: 0 !important;
+  padding-bottom: 0.375rem !important;
   margin-bottom: 0 !important;
 }

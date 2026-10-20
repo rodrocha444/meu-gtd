@@ -19,7 +19,7 @@ export const QuickCaptureBar: React.FC<QuickCaptureBarProps> = ({
   const liveParsed = useMemo(() => parseQuickCaptureInput(value), [value]);
 
   return (
-    <div className="bottom-keyboard-aware shrink-0 px-3 pt-1 pb-0 mb-0 bg-gradient-to-t from-zinc-950 via-zinc-950/95 to-transparent">
+    <div className="bottom-keyboard-aware shrink-0 px-3 pt-1 bg-gradient-to-t from-zinc-950 via-zinc-950/95 to-transparent">
       {/* Pílulas de Preview dos Metadados Detectados pelo Parser NLP */}
       <NLPPreviewPills parsed={liveParsed} />
 

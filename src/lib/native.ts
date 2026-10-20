@@ -3,6 +3,18 @@ import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
 import { Keyboard } from '@capacitor/keyboard';
 import { StatusBar, Style } from '@capacitor/status-bar';
 
+// Marcação de plataforma síncrona
+if (typeof document !== 'undefined') {
+  const platform = Capacitor.getPlatform();
+  const isNative = Capacitor.isNativePlatform();
+  document.documentElement.classList.add(`platform-${platform}`);
+  if (isNative) {
+    document.documentElement.classList.add('is-native');
+  } else {
+    document.documentElement.classList.add('is-pwa');
+  }
+}
+
 /**
  * Ponte de Feedback Físico (Haptics), StatusBar e Teclado Nativo
  */

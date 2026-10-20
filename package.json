@@ -13,6 +13,8 @@
     "db:studio": "drizzle-kit studio",
     "cap:sync": "npm run build && npx cap sync",
     "cap:ios": "npx cap open ios",
+    "cap:live": "CAP_DEV=true npx cap copy ios",
+    "cap:prod": "npx cap copy ios",
     "cap:android": "npx cap open android"
   },
   "dependencies": {
