@@ -3,6 +3,8 @@ import {
   libsqlClient,
   fetchListsFromDb,
   fetchTasksFromDb,
+  fetchNoteFoldersFromDb,
+  fetchNotesFromDb,
   withDatabaseTimeout,
   DB_OPERATION_TIMEOUT_MS,
   type ListRecordUI,
@@ -13,11 +15,16 @@ import {
   removeMutations,
   getPendingDeletedTaskIds,
   getPendingDeletedListIds,
+  getPendingDeletedNoteIds,
+  getPendingDeletedNoteFolderIds,
   applyPendingMutationsToTasks,
   applyPendingMutationsToLists,
+  applyPendingMutationsToNotes,
+  applyPendingMutationsToNoteFolders,
   type SyncMutation,
 } from './syncQueue';
 import type { UITask, UIList } from '../types/task';
+import type { UINote, UINoteFolder } from '../types/note';
 
 /**
  * Converte uma mutação em statements SQL para serem executados em batch no Turso
@@ -32,8 +39,8 @@ function mutationToStatements(mutation: SyncMutation): InStatement[] {
         sql: `INSERT OR REPLACE INTO tasks (
           id, title, description, status, priority, is_pinned, due_date,
           recurrence_rule, recurrence_mode, reminders, list_id, parent_task_id,
-          sort_order, created_at, updated_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          sort_order, created_at, updated_at, completed_at, deleted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           task.id,
           task.title,
@@ -53,6 +60,7 @@ function mutationToStatements(mutation: SyncMutation): InStatement[] {
           task.createdAt,
           task.updatedAt,
           task.completedAt !== null ? task.completedAt : null,
+          task.deletedAt !== null && task.deletedAt !== undefined ? task.deletedAt : null,
         ],
       });
       break;
@@ -119,6 +127,10 @@ function mutationToStatements(mutation: SyncMutation): InStatement[] {
         setClauses.push('completed_at = ?');
         setArgs.push(updates.completedAt !== null ? updates.completedAt : null);
       }
+      if (updates.deletedAt !== undefined) {
+        setClauses.push('deleted_at = ?');
+        setArgs.push(updates.deletedAt !== null ? updates.deletedAt : null);
+      }
 
       setArgs.push(taskId);
       statements.push({
@@ -167,6 +179,145 @@ function mutationToStatements(mutation: SyncMutation): InStatement[] {
         {
           sql: 'DELETE FROM lists WHERE id = ?',
           args: [mutation.listId],
+        }
+      );
+      break;
+    }
+
+    case 'CREATE_NOTE': {
+      const note = mutation.note;
+      statements.push({
+        sql: `INSERT OR REPLACE INTO notes (
+          id, title, content, folder_id, is_pinned, color, sort_order, created_at, updated_at, deleted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          note.id,
+          note.title,
+          note.content ?? '',
+          note.folderId ?? null,
+          note.isPinned ? 1 : 0,
+          note.color ?? null,
+          note.sortOrder ?? 0,
+          note.createdAt,
+          note.updatedAt,
+          note.deletedAt !== null && note.deletedAt !== undefined ? note.deletedAt : null,
+        ],
+      });
+      break;
+    }
+
+    case 'UPDATE_NOTE': {
+      const { noteId, updates, updatedAt } = mutation;
+      const setClauses: string[] = ['updated_at = ?'];
+      const setArgs: InValue[] = [updatedAt];
+
+      if (updates.title !== undefined) {
+        setClauses.push('title = ?');
+        setArgs.push(updates.title);
+      }
+      if (updates.content !== undefined) {
+        setClauses.push('content = ?');
+        setArgs.push(updates.content);
+      }
+      if (updates.folderId !== undefined) {
+        setClauses.push('folder_id = ?');
+        setArgs.push(updates.folderId);
+      }
+      if (updates.isPinned !== undefined) {
+        setClauses.push('is_pinned = ?');
+        setArgs.push(updates.isPinned ? 1 : 0);
+      }
+      if (updates.color !== undefined) {
+        setClauses.push('color = ?');
+        setArgs.push(updates.color);
+      }
+      if (updates.sortOrder !== undefined) {
+        setClauses.push('sort_order = ?');
+        setArgs.push(updates.sortOrder);
+      }
+      if (updates.deletedAt !== undefined) {
+        setClauses.push('deleted_at = ?');
+        setArgs.push(updates.deletedAt !== null ? updates.deletedAt : null);
+      }
+
+      setArgs.push(noteId);
+      statements.push({
+        sql: `UPDATE notes SET ${setClauses.join(', ')} WHERE id = ?`,
+        args: setArgs,
+      });
+      break;
+    }
+
+    case 'DELETE_NOTE': {
+      statements.push({
+        sql: 'DELETE FROM notes WHERE id = ?',
+        args: [mutation.noteId],
+      });
+      break;
+    }
+
+    case 'CREATE_NOTE_FOLDER': {
+      const folder = mutation.folder;
+      statements.push({
+        sql: `INSERT OR REPLACE INTO note_folders (id, name, color, icon, parent_id, sort_order, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          folder.id,
+          folder.name,
+          folder.color ?? '#8b5cf6',
+          folder.icon ?? 'folder',
+          folder.parentId ?? null,
+          folder.sortOrder ?? 0,
+          folder.createdAt,
+          folder.updatedAt,
+        ],
+      });
+      break;
+    }
+
+    case 'UPDATE_NOTE_FOLDER': {
+      const { folderId, updates, updatedAt } = mutation;
+      const setClauses: string[] = ['updated_at = ?'];
+      const setArgs: InValue[] = [updatedAt];
+
+      if (updates.name !== undefined) {
+        setClauses.push('name = ?');
+        setArgs.push(updates.name);
+      }
+      if (updates.color !== undefined) {
+        setClauses.push('color = ?');
+        setArgs.push(updates.color);
+      }
+      if (updates.icon !== undefined) {
+        setClauses.push('icon = ?');
+        setArgs.push(updates.icon);
+      }
+      if (updates.parentId !== undefined) {
+        setClauses.push('parent_id = ?');
+        setArgs.push(updates.parentId);
+      }
+      if (updates.sortOrder !== undefined) {
+        setClauses.push('sort_order = ?');
+        setArgs.push(updates.sortOrder);
+      }
+
+      setArgs.push(folderId);
+      statements.push({
+        sql: `UPDATE note_folders SET ${setClauses.join(', ')} WHERE id = ?`,
+        args: setArgs,
+      });
+      break;
+    }
+
+    case 'DELETE_NOTE_FOLDER': {
+      statements.push(
+        {
+          sql: 'UPDATE notes SET folder_id = NULL WHERE folder_id = ?',
+          args: [mutation.folderId],
+        },
+        {
+          sql: 'DELETE FROM note_folders WHERE id = ?',
+          args: [mutation.folderId],
         }
       );
       break;
@@ -261,6 +412,7 @@ export function reconcileTasksWithLocal(
         createdAt: remote.createdAt,
         updatedAt: remote.updatedAt,
         completedAt: remote.completedAt,
+        deletedAt: remote.deletedAt ?? null,
       });
     }
   }
@@ -325,6 +477,100 @@ export function reconcileListsWithLocal(
   return applyPendingMutationsToLists(reconciledLists);
 }
 
+/**
+ * Reconcilia notas da nuvem com o estado local
+ */
+export function reconcileNotesWithLocal(
+  remoteNotes: UINote[],
+  currentLocalNotes: UINote[]
+): UINote[] {
+  const deletedNoteIds = getPendingDeletedNoteIds();
+  const queue = getPendingMutations();
+  const pendingCreatedNoteIds = new Set(
+    queue.filter((m) => m.type === 'CREATE_NOTE').map((m) => m.note.id)
+  );
+
+  const localMap = new Map<string, UINote>();
+  for (const n of currentLocalNotes) {
+    localMap.set(n.id, n);
+  }
+
+  const reconciledNotes: UINote[] = [];
+  const processedIds = new Set<string>();
+
+  for (const remote of remoteNotes) {
+    if (deletedNoteIds.has(remote.id)) continue;
+    processedIds.add(remote.id);
+    const local = localMap.get(remote.id);
+
+    if (local && local.updatedAt > remote.updatedAt) {
+      reconciledNotes.push(local);
+    } else {
+      reconciledNotes.push(remote);
+    }
+  }
+
+  for (const local of currentLocalNotes) {
+    if (
+      !processedIds.has(local.id) &&
+      pendingCreatedNoteIds.has(local.id) &&
+      !deletedNoteIds.has(local.id)
+    ) {
+      processedIds.add(local.id);
+      reconciledNotes.push(local);
+    }
+  }
+
+  return applyPendingMutationsToNotes(reconciledNotes);
+}
+
+/**
+ * Reconcilia pastas de notas com o estado local
+ */
+export function reconcileNoteFoldersWithLocal(
+  remoteFolders: UINoteFolder[],
+  currentLocalFolders: UINoteFolder[]
+): UINoteFolder[] {
+  const deletedFolderIds = getPendingDeletedNoteFolderIds();
+  const queue = getPendingMutations();
+  const pendingCreatedFolderIds = new Set(
+    queue.filter((m) => m.type === 'CREATE_NOTE_FOLDER').map((m) => m.folder.id)
+  );
+
+  const localMap = new Map<string, UINoteFolder>();
+  for (const f of currentLocalFolders) {
+    localMap.set(f.id, f);
+  }
+
+  const reconciledFolders: UINoteFolder[] = [];
+  const processedIds = new Set<string>();
+
+  for (const remote of remoteFolders) {
+    if (deletedFolderIds.has(remote.id)) continue;
+    processedIds.add(remote.id);
+    const local = localMap.get(remote.id);
+
+    if (local && local.updatedAt > remote.updatedAt) {
+      reconciledFolders.push(local);
+    } else {
+      reconciledFolders.push(remote);
+    }
+  }
+
+  for (const local of currentLocalFolders) {
+    if (
+      !processedIds.has(local.id) &&
+      pendingCreatedFolderIds.has(local.id) &&
+      !deletedFolderIds.has(local.id)
+    ) {
+      processedIds.add(local.id);
+      reconciledFolders.push(local);
+    }
+  }
+
+  return applyPendingMutationsToNoteFolders(reconciledFolders);
+}
+
 let isSyncRunning = false;
 
 export interface SyncResult {
@@ -333,6 +579,8 @@ export interface SyncResult {
   pushedCount: number;
   lists?: UIList[];
   tasks?: UITask[];
+  noteFolders?: UINoteFolder[];
+  notes?: UINote[];
   error?: unknown;
 }
 
@@ -341,7 +589,9 @@ export interface SyncResult {
  */
 export async function performFullSync(
   currentLocalLists: UIList[],
-  currentLocalTasks: UITask[]
+  currentLocalTasks: UITask[],
+  currentLocalFolders: UINoteFolder[] = [],
+  currentLocalNotes: UINote[] = []
 ): Promise<SyncResult> {
   // Evita concorrência de sincronizações simultâneas
   if (isSyncRunning) {
@@ -351,6 +601,8 @@ export async function performFullSync(
       pushedCount: 0,
       lists: currentLocalLists,
       tasks: currentLocalTasks,
+      noteFolders: currentLocalFolders,
+      notes: currentLocalNotes,
     };
   }
 
@@ -362,6 +614,8 @@ export async function performFullSync(
       pushedCount: 0,
       lists: currentLocalLists,
       tasks: currentLocalTasks,
+      noteFolders: currentLocalFolders,
+      notes: currentLocalNotes,
     };
   }
 
@@ -371,14 +625,21 @@ export async function performFullSync(
     const pushedCount = await pushPendingMutations();
 
     // 2. PULL: Baixa versão atualizada da nuvem
-    const [remoteLists, remoteTasks] = await Promise.all([
+    const [remoteLists, remoteTasks, remoteFolders, remoteNotes] = await Promise.all([
       fetchListsFromDb(),
       fetchTasksFromDb(),
+      fetchNoteFoldersFromDb().catch(() => []),
+      fetchNotesFromDb().catch(() => []),
     ]);
 
     // 3. RECONCILE: Mescla com Last-Write-Wins e proteção contra dados perdidos
     const mergedLists = reconcileListsWithLocal(remoteLists, currentLocalLists);
     const mergedTasks = reconcileTasksWithLocal(remoteTasks, currentLocalTasks);
+    const mergedFolders = reconcileNoteFoldersWithLocal(
+      remoteFolders,
+      currentLocalFolders
+    );
+    const mergedNotes = reconcileNotesWithLocal(remoteNotes, currentLocalNotes);
 
     return {
       success: true,
@@ -386,6 +647,8 @@ export async function performFullSync(
       pushedCount,
       lists: mergedLists,
       tasks: mergedTasks,
+      noteFolders: mergedFolders,
+      notes: mergedNotes,
     };
   } catch (err: unknown) {
     console.warn('Falha na sincronização com o banco remoto (permanece offline):', err);
@@ -395,6 +658,8 @@ export async function performFullSync(
       pushedCount: 0,
       lists: currentLocalLists,
       tasks: currentLocalTasks,
+      noteFolders: currentLocalFolders,
+      notes: currentLocalNotes,
       error: err,
     };
   } finally {

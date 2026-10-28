@@ -9,8 +9,11 @@ import {
 import { NativeBridge } from '../../lib/native';
 import { CustomSegmentedControl } from '../ui/CustomControls';
 import type { UIList } from '../../types/task';
+import type { UINoteFolder } from '../../types/note';
+import type { AppNavigationMode } from './Sidebar';
 
 interface MainHeaderProps {
+  appMode?: AppNavigationMode;
   activeView: string;
   activeViewTitle: string;
   isShowingCalendar: boolean;
@@ -23,9 +26,14 @@ interface MainHeaderProps {
   onClearCompleted: () => void;
   currentCustomProject?: UIList | null;
   onDeleteCustomProject?: () => void;
+  currentFolder?: UINoteFolder | null;
+  onDeleteFolder?: () => void;
+  trashCount?: number;
+  onEmptyTrash?: () => void;
 }
 
 export const MainHeader: React.FC<MainHeaderProps> = ({
+  appMode = 'tasks',
   activeView,
   activeViewTitle,
   isShowingCalendar,
@@ -38,6 +46,10 @@ export const MainHeader: React.FC<MainHeaderProps> = ({
   onClearCompleted,
   currentCustomProject,
   onDeleteCustomProject,
+  currentFolder,
+  onDeleteFolder,
+  trashCount = 0,
+  onEmptyTrash,
 }) => {
   return (
     <header className="px-4 pt-2.5 pb-2.5 pt-safe border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur-md">
@@ -46,7 +58,7 @@ export const MainHeader: React.FC<MainHeaderProps> = ({
           {/* Botão para abrir o Menu Lateral no Mobile */}
           <button
             type="button"
-            aria-label="Abrir Menu Lateral de Listas"
+            aria-label="Abrir Menu Lateral"
             onClick={() => {
               void NativeBridge.hapticLightImpact();
               onOpenMobileDrawer();
@@ -61,7 +73,11 @@ export const MainHeader: React.FC<MainHeaderProps> = ({
               {activeViewTitle}
             </h1>
             <p className="text-[11px] text-zinc-400 truncate hidden sm:block">
-              {activeView === 'projects'
+              {activeView === 'trash'
+                ? 'Itens na lixeira serão apagados permanentemente após 30 dias'
+                : appMode === 'notes'
+                ? 'Anotações, rascunhos e diretrizes operacionais organizadas por pastas'
+                : activeView === 'projects'
                 ? 'Revisão Semanal GTD • Garanta que todo projeto tenha uma ação seguinte'
                 : activeView === 'completed'
                 ? 'Histórico completo de tarefas concluídas • Toque no checkbox para reativar'
@@ -75,8 +91,24 @@ export const MainHeader: React.FC<MainHeaderProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Botão Excluir Pasta de Anotações */}
+          {appMode === 'notes' && currentFolder && onDeleteFolder && (
+            <button
+              type="button"
+              aria-label={`Excluir pasta ${currentFolder.name}`}
+              onClick={() => {
+                void NativeBridge.hapticLightImpact();
+                onDeleteFolder();
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-400 hover:text-red-400 hover:bg-red-500/10 border border-zinc-800 hover:border-red-500/25 active:scale-95 transition-all"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Excluir Pasta</span>
+            </button>
+          )}
+
           {/* Botão Limpar Concluídas (na lista separada de Concluídas) */}
-          {activeView === 'completed' && completedCount > 0 && (
+          {appMode === 'tasks' && activeView === 'completed' && completedCount > 0 && (
             <button
               type="button"
               onClick={() => {
@@ -91,7 +123,7 @@ export const MainHeader: React.FC<MainHeaderProps> = ({
           )}
 
           {/* Botão Excluir Projeto (quando estiver visualizando um projeto customizado) */}
-          {currentCustomProject && onDeleteCustomProject && (
+          {appMode === 'tasks' && currentCustomProject && onDeleteCustomProject && (
             <button
               type="button"
               aria-label={`Excluir projeto ${currentCustomProject.name}`}
@@ -106,9 +138,27 @@ export const MainHeader: React.FC<MainHeaderProps> = ({
             </button>
           )}
 
-          {/* Alternador Customizado Lista vs Calendário */}
-          {activeView !== 'projects' && activeView !== 'completed' && (
-            <CustomSegmentedControl<'list' | 'calendar'>
+          {/* Botão Esvaziar Lixeira */}
+          {activeView === 'trash' && trashCount > 0 && onEmptyTrash && (
+            <button
+              type="button"
+              onClick={() => {
+                void NativeBridge.hapticLightImpact();
+                onEmptyTrash();
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-red-400 hover:text-red-300 bg-red-500/10 border border-red-500/25 active:scale-95 transition-all"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Esvaziar Lixeira</span>
+            </button>
+          )}
+
+          {/* Alternador Customizado Lista vs Calendário (apenas no modo Tarefas) */}
+          {appMode === 'tasks' &&
+            activeView !== 'projects' &&
+            activeView !== 'completed' &&
+            activeView !== 'trash' && (
+              <CustomSegmentedControl<'list' | 'calendar'>
               size="sm"
               value={viewLayout}
               onChange={onSetViewLayout}
@@ -127,7 +177,7 @@ export const MainHeader: React.FC<MainHeaderProps> = ({
             />
           )}
 
-          {activeView === 'inbox' && !isShowingCalendar && hasInboxTasks && (
+          {appMode === 'tasks' && activeView === 'inbox' && !isShowingCalendar && hasInboxTasks && (
             <button
               type="button"
               aria-label="Triar Inbox"

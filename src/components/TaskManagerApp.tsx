@@ -7,13 +7,19 @@ import {
   X,
 } from 'lucide-react';
 import type { TaskStatus } from '../db/schema';
-import { GTD_SYSTEM_LISTS } from '../db/client';
+import {
+  getDefaultSystemLists,
+  purgeExpiredTrashInDb,
+  emptyTrashInDb,
+} from '../db/client';
 import { performFullSync } from '../db/syncManager';
 import {
   enqueueMutation,
   getPendingCount,
   applyPendingMutationsToTasks,
   applyPendingMutationsToLists,
+  applyPendingMutationsToNotes,
+  applyPendingMutationsToNoteFolders,
 } from '../db/syncQueue';
 import { NativeBridge } from '../lib/native';
 import { NotificationService } from '../lib/notifications';
@@ -23,6 +29,7 @@ import {
   compareTasksByDayThenPriority,
   compareCompletedTasks,
 } from '../utils/taskSorter';
+import { getDefaultNoteFolders, getDefaultNotes } from '../utils/notesDefaults';
 import { CalendarView } from './CalendarView';
 import type { CustomSelectOption } from './ui/CustomControls';
 import {
@@ -32,42 +39,46 @@ import {
 } from './ui/DatabaseErrorModal';
 import { ConfirmModal } from './ui/ConfirmModal';
 import { NewProjectModal } from './ui/NewProjectModal';
-import { Sidebar } from './organisms/Sidebar';
+import { NewFolderModal } from './ui/NewFolderModal';
+import { Sidebar, type AppNavigationMode } from './organisms/Sidebar';
 import { MobileDrawer } from './organisms/MobileDrawer';
 import { MainHeader } from './organisms/MainHeader';
 import { TaskList } from './organisms/TaskList';
 import { ProjectsHub } from './organisms/ProjectsHub';
+import { NotesView } from './organisms/NotesView';
+import { NoteEditorSheet } from './organisms/NoteEditorSheet';
+import { TrashView } from './organisms/TrashView';
 import { QuickCaptureBar } from './organisms/QuickCaptureBar';
 import { TaskDetailSheet } from './organisms/TaskDetailSheet';
 import { TriageSheet } from './organisms/TriageSheet';
+import { isExpiredTrash } from '../utils/trash';
 import type { ProjectStat } from './molecules/ProjectCard';
 import type { UIList, UITask, SmartViewId } from '../types/task';
+import type { UINote, UINoteFolder } from '../types/note';
 
 export type { UIList, UITask, SmartViewId };
 
 const CACHE_KEYS = {
   LISTS: 'meu_gtd_cached_lists',
   TASKS: 'meu_gtd_cached_tasks',
+  NOTE_FOLDERS: 'meu_gtd_cached_note_folders',
+  NOTES: 'meu_gtd_cached_notes',
 };
 
 function loadCachedLists(): UIList[] {
   try {
     const raw = localStorage.getItem(CACHE_KEYS.LISTS);
     const parsed = raw ? JSON.parse(raw) : [];
+    const filteredParsed = Array.isArray(parsed)
+      ? parsed.filter((l: UIList) => l.id !== 'waiting_for')
+      : [];
     const base: UIList[] =
-      Array.isArray(parsed) && parsed.length > 0
-        ? parsed
-        : GTD_SYSTEM_LISTS.map((l) => ({
-            id: l.id,
-            name: l.name,
-            color: l.color ?? '#6366f1',
-            icon: l.icon ?? 'inbox',
-            isGtdSystem: Boolean(l.isGtdSystem),
-            sortOrder: l.sortOrder ?? 0,
-          }));
+      filteredParsed.length > 0
+        ? filteredParsed
+        : getDefaultSystemLists();
     return applyPendingMutationsToLists(base);
   } catch {
-    return [];
+    return getDefaultSystemLists();
   }
 }
 
@@ -76,17 +87,64 @@ function loadCachedTasks(): UITask[] {
     const raw = localStorage.getItem(CACHE_KEYS.TASKS);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    const base: UITask[] = Array.isArray(parsed) ? parsed : [];
-    return applyPendingMutationsToTasks(base as any) as UITask[];
+    const base: UITask[] =
+      Array.isArray(parsed) && parsed.length > 0
+        ? parsed
+        : [];
+    const applied = applyPendingMutationsToTasks(base as any) as UITask[];
+    return applied
+      .filter((t) => !isExpiredTrash(t.deletedAt))
+      .map((t) => (t.listId === 'waiting_for' ? { ...t, listId: 'inbox' } : t));
   } catch {
     return [];
   }
 }
 
+function loadCachedNoteFolders(): UINoteFolder[] {
+  try {
+    const raw = localStorage.getItem(CACHE_KEYS.NOTE_FOLDERS);
+    const parsed = raw ? JSON.parse(raw) : [];
+    const base: UINoteFolder[] =
+      Array.isArray(parsed) && parsed.length > 0
+        ? parsed
+        : getDefaultNoteFolders();
+    return applyPendingMutationsToNoteFolders(base);
+  } catch {
+    return getDefaultNoteFolders();
+  }
+}
+
+function loadCachedNotes(): UINote[] {
+  try {
+    const raw = localStorage.getItem(CACHE_KEYS.NOTES);
+    if (!raw) return getDefaultNotes();
+    const parsed = JSON.parse(raw);
+    const base: UINote[] =
+      Array.isArray(parsed) && parsed.length > 0
+        ? parsed
+        : getDefaultNotes();
+    const applied = applyPendingMutationsToNotes(base);
+    return applied.filter((n) => !isExpiredTrash(n.deletedAt));
+  } catch {
+    return getDefaultNotes();
+  }
+}
+
 function saveCache(lists: UIList[], tasks: UITask[]) {
   try {
+    const cleanTasks = tasks.filter((t) => !isExpiredTrash(t.deletedAt));
     localStorage.setItem(CACHE_KEYS.LISTS, JSON.stringify(lists));
-    localStorage.setItem(CACHE_KEYS.TASKS, JSON.stringify(tasks));
+    localStorage.setItem(CACHE_KEYS.TASKS, JSON.stringify(cleanTasks));
+  } catch {
+    // Modo anônimo ou limite de quota atingido
+  }
+}
+
+function saveNotesCache(folders: UINoteFolder[], notes: UINote[]) {
+  try {
+    const cleanNotes = notes.filter((n) => !isExpiredTrash(n.deletedAt));
+    localStorage.setItem(CACHE_KEYS.NOTE_FOLDERS, JSON.stringify(folders));
+    localStorage.setItem(CACHE_KEYS.NOTES, JSON.stringify(cleanNotes));
   } catch {
     // Modo anônimo ou limite de quota atingido
   }
@@ -100,18 +158,14 @@ export const TaskManagerApp: React.FC = () => {
   const [lists, setLists] = useState<UIList[]>(() => {
     const cached = loadCachedLists();
     if (cached.length > 0) return cached;
-    return GTD_SYSTEM_LISTS.map((l) => ({
-      id: l.id,
-      name: l.name,
-      color: l.color ?? '#6366f1',
-      icon: l.icon ?? 'inbox',
-      isGtdSystem: Boolean(l.isGtdSystem),
-      sortOrder: l.sortOrder ?? 0,
-    }));
+    return getDefaultSystemLists();
   });
   const [tasks, setTasks] = useState<UITask[]>(() => loadCachedTasks());
   const [pendingCount, setPendingCount] = useState<number>(() => getPendingCount());
-  const [isLoading, setIsLoading] = useState<boolean>(() => loadCachedTasks().length === 0);
+  const [isLoading, setIsLoading] = useState<boolean>(() => {
+    const raw = localStorage.getItem(CACHE_KEYS.LISTS);
+    return !raw;
+  });
   const hasUserSelectedViewRef = useRef(false);
   const [activeView, setActiveView] = useState<SmartViewId>(() => {
     const cached = loadCachedTasks();
@@ -144,6 +198,27 @@ export const TaskManagerApp: React.FC = () => {
   const [recurrenceBanner, setRecurrenceBanner] = useState<string | null>(null);
   const [dbError, setDbError] = useState<DatabaseErrorInfo | null>(null);
 
+  // Modo de Navegação Principal: Tarefas GTD vs Anotações / Rascunhos
+  const [appMode, setAppMode] = useState<AppNavigationMode>('tasks');
+
+  // Controle de Pastas e Anotações
+  const [noteFolders, setNoteFolders] = useState<UINoteFolder[]>(() =>
+    loadCachedNoteFolders()
+  );
+  const [notes, setNotes] = useState<UINote[]>(() => loadCachedNotes());
+  const [activeFolderId, setActiveFolderId] = useState<string>('all');
+  const [selectedNote, setSelectedNote] = useState<UINote | null>(null);
+  const [isNewFolderModalOpen, setIsNewFolderModalOpen] = useState<boolean>(false);
+  const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
+  const [folderToDelete, setFolderToDelete] = useState<UINoteFolder | null>(null);
+  const [noteToDelete, setNoteToDelete] = useState<UINote | null>(null);
+
+  // Refs de pastas e notas para reconciliação atômica
+  const noteFoldersRef = useRef(noteFolders);
+  noteFoldersRef.current = noteFolders;
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
+
   // Controle de Projetos GTD e Agrupamento
   const [isNewProjectModalOpen, setIsNewProjectModalOpen] = useState<boolean>(false);
   const [projectToDelete, setProjectToDelete] = useState<UIList | null>(null);
@@ -151,9 +226,19 @@ export const TaskManagerApp: React.FC = () => {
   const [taskToComplete, setTaskToComplete] = useState<UITask | null>(null);
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState<boolean>(false);
   const [isClearCompletedModalOpen, setIsClearCompletedModalOpen] = useState<boolean>(false);
+  const [isEmptyTrashModalOpen, setIsEmptyTrashModalOpen] = useState<boolean>(false);
+
+  // Helper para contagem de notas por pasta
+  const getNoteCountForFolder = (folderId: string): number => {
+    return notes.filter((n) => !n.deletedAt && n.folderId === folderId).length;
+  };
 
   // Helper unificado para contagem de tarefas pendentes ou concluídas por view
   const getTaskCountForView = (viewId: string): number => {
+    if (viewId === 'trash') {
+      return tasks.filter((t) => Boolean(t.deletedAt) && t.parentTaskId === null).length;
+    }
+
     const endOfToday = new Date();
     endOfToday.setHours(23, 59, 59, 999);
     const endOfTodayTime = endOfToday.getTime();
@@ -165,6 +250,7 @@ export const TaskManagerApp: React.FC = () => {
 
     return tasks.filter(
       (t) =>
+        !t.deletedAt &&
         t.parentTaskId === null &&
         (viewId === 'completed'
           ? t.status === 'completed'
@@ -226,7 +312,12 @@ export const TaskManagerApp: React.FC = () => {
 
     setSyncState('syncing');
     try {
-      const result = await performFullSync(listsRef.current, tasksRef.current);
+      const result = await performFullSync(
+        listsRef.current,
+        tasksRef.current,
+        noteFoldersRef.current,
+        notesRef.current
+      );
       if (result.offline) {
         setSyncState('offline');
         if (isManual) {
@@ -246,6 +337,13 @@ export const TaskManagerApp: React.FC = () => {
             );
             setActiveView(hasInboxTasks ? 'inbox' : 'today');
           }
+        }
+        if (result.noteFolders && result.notes) {
+          noteFoldersRef.current = result.noteFolders;
+          notesRef.current = result.notes;
+          setNoteFolders(result.noteFolders);
+          setNotes(result.notes);
+          saveNotesCache(result.noteFolders, result.notes);
         }
         setSyncState('synced');
         if (isManual) {
@@ -289,6 +387,7 @@ export const TaskManagerApp: React.FC = () => {
 
   // Inicialização Local-First: dados locais já exibidos; sincroniza novidades se online
   useEffect(() => {
+    void purgeExpiredTrashInDb();
     void triggerSync(false);
     void NotificationService.requestPermissions().then((granted) => {
       if (granted && tasksRef.current.length > 0) {
@@ -346,6 +445,8 @@ export const TaskManagerApp: React.FC = () => {
           setIsClearCompletedModalOpen(false);
         } else if (isMobileDrawerOpen) {
           setIsMobileDrawerOpen(false);
+        } else if (isEmptyTrashModalOpen) {
+          setIsEmptyTrashModalOpen(false);
         }
       }
     };
@@ -357,6 +458,7 @@ export const TaskManagerApp: React.FC = () => {
     projectToDelete,
     isClearCompletedModalOpen,
     isMobileDrawerOpen,
+    isEmptyTrashModalOpen,
   ]);
 
   // Opções customizadas para o CustomSelect de Listas
@@ -371,6 +473,14 @@ export const TaskManagerApp: React.FC = () => {
     [lists]
   );
 
+  // Itens ativos e lixeira filtrados
+  const activeTasks = useMemo(() => tasks.filter((t) => !t.deletedAt), [tasks]);
+  const trashTasks = useMemo(() => tasks.filter((t) => Boolean(t.deletedAt)), [tasks]);
+  const activeNotes = useMemo(() => notes.filter((n) => !n.deletedAt), [notes]);
+  const trashNotes = useMemo(() => notes.filter((n) => Boolean(n.deletedAt)), [notes]);
+  const trashNotesCount = useMemo(() => trashNotes.length, [trashNotes]);
+  const totalNotesCount = useMemo(() => activeNotes.length, [activeNotes]);
+
   // Filtra tarefas principais (sem parentTaskId) de acordo com a Smart List GTD ativa
   const filteredRootTasks = useMemo(() => {
     const startOfToday = new Date();
@@ -379,7 +489,7 @@ export const TaskManagerApp: React.FC = () => {
     endOfToday.setHours(23, 59, 59, 999);
 
     return tasks
-      .filter((t) => t.parentTaskId === null)
+      .filter((t) => t.parentTaskId === null && !t.deletedAt)
       .filter((t) => {
         if (activeView === 'calendar') {
           return true;
@@ -458,7 +568,7 @@ export const TaskManagerApp: React.FC = () => {
     const customProjects = lists.filter((l) => !l.isGtdSystem);
     return customProjects.map((p) => {
       const projTasks = tasks.filter(
-        (t) => t.listId === p.id && t.parentTaskId === null
+        (t) => !t.deletedAt && t.listId === p.id && t.parentTaskId === null
       );
       const completedTasks = projTasks.filter(
         (t) => t.status === 'completed'
@@ -551,13 +661,287 @@ export const TaskManagerApp: React.FC = () => {
     void triggerSync();
   };
 
-  // Excluir Tarefa GTD
+  // --- OPERAÇÕES DE ANOTAÇÕES & PASTAS ---
+  const handleCreateNote = (targetFolderId?: string | null) => {
+    const now = Date.now();
+    const newNote: UINote = {
+      id: `note-${now}-${Math.random().toString(36).slice(2, 7)}`,
+      title: '',
+      content: '',
+      folderId:
+        targetFolderId ??
+        (activeFolderId !== 'all' && activeFolderId !== 'unfiled'
+          ? activeFolderId
+          : null),
+      isPinned: false,
+      color: null,
+      sortOrder: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const updatedNotes = [newNote, ...notes];
+    notesRef.current = updatedNotes;
+    setNotes(updatedNotes);
+    saveNotesCache(noteFoldersRef.current, updatedNotes);
+    enqueueMutation({
+      type: 'CREATE_NOTE',
+      note: newNote,
+      createdAt: now,
+    });
+    setPendingCount(getPendingCount());
+    setSelectedNote(newNote);
+    void triggerSync();
+  };
+
+  const handleUpdateNote = (
+    noteId: string,
+    updates: Partial<Pick<UINote, 'title' | 'content' | 'folderId' | 'isPinned'>>
+  ) => {
+    const now = Date.now();
+    const updatedNotes = notes.map((n) => {
+      if (n.id !== noteId) return n;
+      return {
+        ...n,
+        ...updates,
+        updatedAt: now,
+      };
+    });
+    notesRef.current = updatedNotes;
+    setNotes(updatedNotes);
+    saveNotesCache(noteFoldersRef.current, updatedNotes);
+    enqueueMutation({
+      type: 'UPDATE_NOTE',
+      noteId,
+      updates: {
+        ...updates,
+        updatedAt: now,
+      },
+      updatedAt: now,
+    });
+    setPendingCount(getPendingCount());
+    if (selectedNote && selectedNote.id === noteId) {
+      setSelectedNote((prev) =>
+        prev ? { ...prev, ...updates, updatedAt: now } : null
+      );
+    }
+    void triggerSync();
+  };
+
+  const handleTogglePinNote = (note: UINote) => {
+    handleUpdateNote(note.id, { isPinned: !note.isPinned });
+  };
+
+  const handleConfirmDeleteNote = () => {
+    if (!noteToDelete) return;
+    const targetId = noteToDelete.id;
+    const now = Date.now();
+
+    if (noteToDelete.deletedAt) {
+      // Exclusão definitiva permanente
+      const updatedNotes = notes.filter((n) => n.id !== targetId);
+      notesRef.current = updatedNotes;
+      setNotes(updatedNotes);
+      saveNotesCache(noteFoldersRef.current, updatedNotes);
+      enqueueMutation({
+        type: 'DELETE_NOTE',
+        noteId: targetId,
+        deletedAt: now,
+      });
+      setPendingCount(getPendingCount());
+      if (selectedNote?.id === targetId) {
+        setSelectedNote(null);
+      }
+      setNoteToDelete(null);
+      void NativeBridge.hapticSwipeAction();
+      setRecurrenceBanner('Anotação apagada permanentemente');
+      void triggerSync();
+      return;
+    }
+
+    // Mover para a Lixeira
+    const updatedNotes = notes.map((n) => {
+      if (n.id === targetId) {
+        return { ...n, deletedAt: now, updatedAt: now };
+      }
+      return n;
+    });
+    notesRef.current = updatedNotes;
+    setNotes(updatedNotes);
+    saveNotesCache(noteFoldersRef.current, updatedNotes);
+    enqueueMutation({
+      type: 'UPDATE_NOTE',
+      noteId: targetId,
+      updates: { deletedAt: now },
+      updatedAt: now,
+    });
+    setPendingCount(getPendingCount());
+    if (selectedNote?.id === targetId) {
+      setSelectedNote(null);
+    }
+    setNoteToDelete(null);
+    void NativeBridge.hapticSwipeAction();
+    setRecurrenceBanner('Anotação enviada para a Lixeira (apagada após 30 dias)');
+    void triggerSync();
+  };
+
+  const handleRestoreNote = (note: UINote) => {
+    const now = Date.now();
+    void NativeBridge.hapticMediumImpact();
+
+    const folderExists = note.folderId
+      ? noteFolders.some((f) => f.id === note.folderId)
+      : true;
+    const targetFolderId = folderExists ? note.folderId : null;
+
+    const updatedNotes = notes.map((n) => {
+      if (n.id === note.id) {
+        return {
+          ...n,
+          folderId: targetFolderId,
+          deletedAt: null,
+          updatedAt: now,
+        };
+      }
+      return n;
+    });
+
+    notesRef.current = updatedNotes;
+    setNotes(updatedNotes);
+    saveNotesCache(noteFoldersRef.current, updatedNotes);
+
+    enqueueMutation({
+      type: 'UPDATE_NOTE',
+      noteId: note.id,
+      updates: {
+        folderId: targetFolderId,
+        deletedAt: null,
+      },
+      updatedAt: now,
+    });
+
+    setRecurrenceBanner('Anotação restaurada com sucesso!');
+    void triggerSync();
+  };
+
+  const handleMoveNoteToFolder = (noteId: string, folderId: string | null) => {
+    handleUpdateNote(noteId, { folderId });
+    void NativeBridge.hapticSwipeAction();
+  };
+
+  const handleOpenNewFolderModal = (parentId?: string | null) => {
+    setNewFolderParentId(
+      parentId !== undefined
+        ? parentId
+        : activeFolderId === 'all'
+        ? null
+        : activeFolderId
+    );
+    setIsNewFolderModalOpen(true);
+  };
+
+  const handleCreateFolder = (
+    name: string,
+    color: string,
+    parentId?: string | null
+  ) => {
+    const targetParentId = parentId !== undefined ? parentId : newFolderParentId;
+    const now = Date.now();
+    const newFolder: UINoteFolder = {
+      id: `folder-${now}-${Math.random().toString(36).slice(2, 7)}`,
+      name,
+      color,
+      icon: 'folder',
+      parentId: targetParentId ?? null,
+      sortOrder: noteFolders.length,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const updatedFolders = [...noteFolders, newFolder];
+    noteFoldersRef.current = updatedFolders;
+    setNoteFolders(updatedFolders);
+    saveNotesCache(updatedFolders, notesRef.current);
+    enqueueMutation({
+      type: 'CREATE_NOTE_FOLDER',
+      folder: newFolder,
+      createdAt: now,
+    });
+    setPendingCount(getPendingCount());
+    setIsNewFolderModalOpen(false);
+    setActiveFolderId(newFolder.id);
+    void NativeBridge.hapticSwipeAction();
+    void triggerSync();
+  };
+
+  const handleConfirmDeleteFolder = () => {
+    if (!folderToDelete) return;
+    const targetFolderId = folderToDelete.id;
+    const fallbackParentId = folderToDelete.parentId ?? null;
+    const now = Date.now();
+    // Subpastas e anotações voltam para a pasta pai (ou raiz)
+    const updatedFolders = noteFolders
+      .filter((f) => f.id !== targetFolderId)
+      .map((f) =>
+        f.parentId === targetFolderId
+          ? { ...f, parentId: fallbackParentId, updatedAt: now }
+          : f
+      );
+    const updatedNotes = notes.map((n) =>
+      n.folderId === targetFolderId
+        ? { ...n, folderId: fallbackParentId, updatedAt: now }
+        : n
+    );
+    noteFoldersRef.current = updatedFolders;
+    notesRef.current = updatedNotes;
+    setNoteFolders(updatedFolders);
+    setNotes(updatedNotes);
+    saveNotesCache(updatedFolders, updatedNotes);
+    enqueueMutation({
+      type: 'DELETE_NOTE_FOLDER',
+      folderId: targetFolderId,
+      deletedAt: now,
+    });
+    setPendingCount(getPendingCount());
+    if (activeFolderId === targetFolderId) {
+      setActiveFolderId(fallbackParentId ?? 'all');
+    }
+    setFolderToDelete(null);
+    void NativeBridge.hapticSwipeAction();
+    void triggerSync();
+  };
+
+  // Excluir Tarefa GTD (Mover para a Lixeira se ativa; Exclusão permanente se já estiver na lixeira)
   const handleConfirmDeleteTask = () => {
     if (!taskToDelete) return;
     const targetId = taskToDelete.id;
+    const now = Date.now();
 
     void NativeBridge.hapticLightImpact();
-    const updatedTasks = tasks.filter((t) => t.id !== targetId && t.parentTaskId !== targetId);
+
+    if (taskToDelete.deletedAt) {
+      // Exclusão definitiva permanente
+      const updatedTasks = tasks.filter((t) => t.id !== targetId && t.parentTaskId !== targetId);
+      tasksRef.current = updatedTasks;
+      setTasks(updatedTasks);
+      saveCache(listsRef.current, updatedTasks);
+
+      if (selectedTaskId === targetId) {
+        setSelectedTaskId(null);
+      }
+      setTaskToDelete(null);
+      enqueueMutation({ type: 'DELETE_TASK', taskId: targetId });
+      setRecurrenceBanner('Tarefa apagada permanentemente');
+      void triggerSync();
+      return;
+    }
+
+    // Mover para a Lixeira (tarefa e suas subtarefas)
+    const updatedTasks = tasks.map((t) => {
+      if (t.id === targetId || t.parentTaskId === targetId) {
+        return { ...t, deletedAt: now, updatedAt: now };
+      }
+      return t;
+    });
     tasksRef.current = updatedTasks;
     setTasks(updatedTasks);
     saveCache(listsRef.current, updatedTasks);
@@ -573,12 +957,12 @@ export const TaskManagerApp: React.FC = () => {
     }
 
     if (taskToDelete.listId === 'inbox' && activeView === 'inbox') {
-      const remainingPendingInbox = tasks.filter(
+      const remainingPendingInbox = updatedTasks.filter(
         (t) =>
+          !t.deletedAt &&
           t.parentTaskId === null &&
           t.status === 'pending' &&
-          t.listId === 'inbox' &&
-          t.id !== targetId
+          t.listId === 'inbox'
       ).length;
       if (remainingPendingInbox === 0) {
         setActiveView('today');
@@ -587,27 +971,162 @@ export const TaskManagerApp: React.FC = () => {
     }
 
     setTaskToDelete(null);
-
     void NotificationService.cancelTaskReminders(targetId);
-    enqueueMutation({ type: 'DELETE_TASK', taskId: targetId });
+
+    enqueueMutation({
+      type: 'UPDATE_TASK',
+      taskId: targetId,
+      updates: { deletedAt: now },
+      updatedAt: now,
+    });
+    const subtasks = tasks.filter((t) => t.parentTaskId === targetId);
+    for (const sub of subtasks) {
+      enqueueMutation({
+        type: 'UPDATE_TASK',
+        taskId: sub.id,
+        updates: { deletedAt: now },
+        updatedAt: now,
+      });
+    }
+
+    setRecurrenceBanner('Tarefa enviada para a Lixeira (apagada após 30 dias)');
     void triggerSync();
   };
 
-  // Limpar todas as tarefas concluídas do sistema
+  // Restaurar Tarefa da Lixeira
+  const handleRestoreTask = (task: UITask) => {
+    const now = Date.now();
+    void NativeBridge.hapticMediumImpact();
+
+    const listExists = lists.some((l) => l.id === task.listId);
+    const targetListId = listExists ? task.listId : 'inbox';
+
+    const parentExists = task.parentTaskId
+      ? tasks.some((t) => t.id === task.parentTaskId && !t.deletedAt)
+      : false;
+    const targetParentId = parentExists ? task.parentTaskId : null;
+
+    const updatedTasks = tasks.map((t) => {
+      if (t.id === task.id) {
+        return {
+          ...t,
+          listId: targetListId,
+          parentTaskId: targetParentId,
+          deletedAt: null,
+          updatedAt: now,
+        };
+      }
+      if (t.parentTaskId === task.id) {
+        return {
+          ...t,
+          deletedAt: null,
+          updatedAt: now,
+        };
+      }
+      return t;
+    });
+
+    tasksRef.current = updatedTasks;
+    setTasks(updatedTasks);
+    saveCache(listsRef.current, updatedTasks);
+
+    enqueueMutation({
+      type: 'UPDATE_TASK',
+      taskId: task.id,
+      updates: {
+        listId: targetListId,
+        parentTaskId: targetParentId,
+        deletedAt: null,
+      },
+      updatedAt: now,
+    });
+
+    const subtasks = tasks.filter((t) => t.parentTaskId === task.id);
+    for (const sub of subtasks) {
+      enqueueMutation({
+        type: 'UPDATE_TASK',
+        taskId: sub.id,
+        updates: { deletedAt: null },
+        updatedAt: now,
+      });
+    }
+
+    if (task.dueDate && task.dueDate > now) {
+      void NotificationService.scheduleTaskReminders({
+        ...task,
+        deletedAt: null,
+      });
+    }
+
+    setRecurrenceBanner('Tarefa restaurada com sucesso!');
+    void triggerSync();
+  };
+
+  // Limpar todas as tarefas concluídas do sistema (Mover para a Lixeira)
   const handleConfirmClearCompleted = () => {
     void NativeBridge.hapticLightImpact();
-    const completedTasksList = tasks.filter((t) => t.status === 'completed');
-    const completedIds = completedTasksList.map((t) => t.id);
+    const now = Date.now();
+    const completedTasksList = tasks.filter((t) => t.status === 'completed' && !t.deletedAt);
+    const completedIds = new Set(completedTasksList.map((t) => t.id));
 
-    setTasks((prev) => prev.filter((t) => t.status !== 'completed'));
+    const updatedTasks = tasks.map((t) => {
+      if (completedIds.has(t.id)) {
+        return { ...t, deletedAt: now, updatedAt: now };
+      }
+      return t;
+    });
+
+    tasksRef.current = updatedTasks;
+    setTasks(updatedTasks);
+    saveCache(listsRef.current, updatedTasks);
+
     if (selectedTask && selectedTask.status === 'completed') {
       setSelectedTaskId(null);
     }
     setIsClearCompletedModalOpen(false);
 
-    for (const id of completedIds) {
-      enqueueMutation({ type: 'DELETE_TASK', taskId: id });
+    for (const t of completedTasksList) {
+      enqueueMutation({
+        type: 'UPDATE_TASK',
+        taskId: t.id,
+        updates: { deletedAt: now },
+        updatedAt: now,
+      });
     }
+
+    setRecurrenceBanner('Tarefas concluídas enviadas para a Lixeira');
+    void triggerSync();
+  };
+
+  // Esvaziar Lixeira completamente (Tarefas e Anotações)
+  const handleConfirmEmptyTrash = () => {
+    void NativeBridge.hapticLightImpact();
+    const now = Date.now();
+
+    const tasksToDeleteIds = tasks.filter((t) => t.deletedAt != null).map((t) => t.id);
+    const notesToDeleteIds = notes.filter((n) => n.deletedAt != null).map((n) => n.id);
+
+    const updatedTasks = tasks.filter((t) => t.deletedAt == null);
+    const updatedNotes = notes.filter((n) => n.deletedAt == null);
+
+    tasksRef.current = updatedTasks;
+    setTasks(updatedTasks);
+    saveCache(listsRef.current, updatedTasks);
+
+    notesRef.current = updatedNotes;
+    setNotes(updatedNotes);
+    saveNotesCache(noteFoldersRef.current, updatedNotes);
+
+    for (const taskId of tasksToDeleteIds) {
+      enqueueMutation({ type: 'DELETE_TASK', taskId, deletedAt: now });
+    }
+    for (const noteId of notesToDeleteIds) {
+      enqueueMutation({ type: 'DELETE_NOTE', noteId, deletedAt: now });
+    }
+
+    setIsEmptyTrashModalOpen(false);
+    setRecurrenceBanner('Lixeira esvaziada com sucesso!');
+    void emptyTrashInDb('all');
     void triggerSync();
   };
 
@@ -1008,14 +1527,24 @@ export const TaskManagerApp: React.FC = () => {
     await triggerSync(true);
   };
 
+  const currentFolder = useMemo(() => {
+    if (activeFolderId === 'all') return null;
+    return noteFolders.find((f) => f.id === activeFolderId) ?? null;
+  }, [noteFolders, activeFolderId]);
+
   const activeViewTitle = useMemo(() => {
+    if (activeView === 'trash') return 'Lixeira';
+    if (appMode === 'notes') {
+      if (activeFolderId === 'all') return 'Todas as Anotações';
+      return currentFolder?.name ?? 'Anotações';
+    }
     if (activeView === 'today') return 'Hoje';
     if (activeView === 'next_days' || activeView === 'next_7_days') return 'Próximos Dias';
     if (activeView === 'calendar') return 'Calendário & Eventos';
     if (activeView === 'projects') return 'Lista de Projetos GTD';
     if (activeView === 'completed') return 'Concluídas';
     return listMap[activeView]?.name ?? 'Inbox';
-  }, [activeView, listMap]);
+  }, [appMode, activeFolderId, currentFolder, activeView, listMap]);
 
   const currentCustomProject = useMemo(
     () => lists.find((l) => !l.isGtdSystem && l.id === activeView) ?? null,
@@ -1023,7 +1552,10 @@ export const TaskManagerApp: React.FC = () => {
   );
 
   const isShowingCalendar =
-    activeView === 'calendar' || viewLayout === 'calendar';
+    (activeView === 'calendar' || viewLayout === 'calendar') &&
+    activeView !== 'projects' &&
+    activeView !== 'completed' &&
+    activeView !== 'trash';
 
   return (
     <div
@@ -1034,9 +1566,25 @@ export const TaskManagerApp: React.FC = () => {
       <Sidebar
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
+        appMode={appMode}
+        onToggleMode={setAppMode}
         activeView={activeView}
         onSelectView={handleSelectView}
         lists={lists}
+        noteFolders={noteFolders}
+        activeFolderId={activeFolderId}
+        onSelectFolder={(fId) => {
+          setActiveFolderId(fId);
+          if (activeView === 'trash') {
+            setActiveView('inbox');
+          }
+        }}
+        onCreateFolder={() => handleOpenNewFolderModal()}
+        onDeleteFolder={(f) => setFolderToDelete(f)}
+        getNoteCountForFolder={getNoteCountForFolder}
+        totalNotesCount={totalNotesCount}
+        trashNotesCount={trashNotesCount}
+        onMoveNoteToFolder={handleMoveNoteToFolder}
         syncState={syncState}
         pendingCount={pendingCount}
         onSync={() => void handleManualSync()}
@@ -1048,9 +1596,25 @@ export const TaskManagerApp: React.FC = () => {
       <MobileDrawer
         isOpen={isMobileDrawerOpen}
         onClose={() => setIsMobileDrawerOpen(false)}
+        appMode={appMode}
+        onToggleMode={setAppMode}
         activeView={activeView}
         onSelectView={handleSelectView}
         lists={lists}
+        noteFolders={noteFolders}
+        activeFolderId={activeFolderId}
+        onSelectFolder={(fId) => {
+          setActiveFolderId(fId);
+          if (activeView === 'trash') {
+            setActiveView('inbox');
+          }
+        }}
+        onCreateFolder={() => handleOpenNewFolderModal()}
+        onDeleteFolder={(f) => setFolderToDelete(f)}
+        getNoteCountForFolder={getNoteCountForFolder}
+        totalNotesCount={totalNotesCount}
+        trashNotesCount={trashNotesCount}
+        onMoveNoteToFolder={handleMoveNoteToFolder}
         syncState={syncState}
         pendingCount={pendingCount}
         onSync={() => void handleManualSync()}
@@ -1084,6 +1648,7 @@ export const TaskManagerApp: React.FC = () => {
 
         {/* Cabeçalho */}
         <MainHeader
+          appMode={appMode}
           activeView={activeView}
           activeViewTitle={activeViewTitle}
           isShowingCalendar={isShowingCalendar}
@@ -1099,6 +1664,10 @@ export const TaskManagerApp: React.FC = () => {
           onClearCompleted={() => setIsClearCompletedModalOpen(true)}
           currentCustomProject={currentCustomProject}
           onDeleteCustomProject={() => setProjectToDelete(currentCustomProject)}
+          currentFolder={currentFolder}
+          onDeleteFolder={() => currentFolder && setFolderToDelete(currentFolder)}
+          trashCount={trashTasks.length + trashNotes.length}
+          onEmptyTrash={() => setIsEmptyTrashModalOpen(true)}
         />
 
         {/* Banner de Confirmação de Recorrência Gerada */}
@@ -1123,9 +1692,36 @@ export const TaskManagerApp: React.FC = () => {
               <RefreshCw className="w-8 h-8 text-indigo-400 animate-spin mb-3" />
               <p className="text-xs text-zinc-400">Carregando...</p>
             </div>
+          ) : activeView === 'trash' ? (
+            <TrashView
+              tasks={trashTasks}
+              notes={trashNotes}
+              lists={lists}
+              folders={noteFolders}
+              defaultTab={appMode === 'notes' ? 'notes' : 'tasks'}
+              onRestoreTask={handleRestoreTask}
+              onRestoreNote={handleRestoreNote}
+              onDeletePermanentlyTask={(t) => setTaskToDelete(t)}
+              onDeletePermanentlyNote={(n) => setNoteToDelete(n)}
+              onEmptyTrash={() => setIsEmptyTrashModalOpen(true)}
+            />
+          ) : appMode === 'notes' ? (
+            <NotesView
+              notes={activeNotes}
+              folders={noteFolders}
+              activeFolderId={activeFolderId}
+              onSelectFolder={setActiveFolderId}
+              onSelectNote={(n) => setSelectedNote(n)}
+              onCreateNote={handleCreateNote}
+              onTogglePin={handleTogglePinNote}
+              onDeleteNote={(n) => setNoteToDelete(n)}
+              onCreateFolder={handleOpenNewFolderModal}
+              onDeleteFolder={(f) => setFolderToDelete(f)}
+              onMoveNoteToFolder={handleMoveNoteToFolder}
+            />
           ) : isShowingCalendar ? (
             <CalendarView
-              tasks={tasks}
+              tasks={activeTasks}
               listMap={listMap}
               selectedTaskId={selectedTaskId}
               onSelectTask={(t) => setSelectedTaskId(t.id)}
@@ -1148,7 +1744,7 @@ export const TaskManagerApp: React.FC = () => {
               pendingTasks={pendingRootTasks}
               futureTasks={futureRootTasks}
               completedTasks={completedRootTasks}
-              allTasks={tasks}
+              allTasks={activeTasks}
               listMap={listMap}
               selectedTaskId={selectedTaskId}
               onSelectTask={(t) => setSelectedTaskId(t.id)}
@@ -1160,13 +1756,15 @@ export const TaskManagerApp: React.FC = () => {
           )}
         </section>
 
-        {/* Barra de Captura Rápida (Quick Capture) */}
-        <QuickCaptureBar
-          value={quickInput}
-          onChange={setQuickInput}
-          onSubmit={handleQuickAddSubmit}
-          activeView={activeView}
-        />
+        {/* Barra de Captura Rápida (Quick Capture - apenas no modo Tarefas e fora da Lixeira) */}
+        {appMode === 'tasks' && activeView !== 'trash' && (
+          <QuickCaptureBar
+            value={quickInput}
+            onChange={setQuickInput}
+            onSubmit={handleQuickAddSubmit}
+            activeView={activeView}
+          />
+        )}
       </main>
 
       {/* Painel Lateral / Bottom Sheet de Detalhes da Tarefa */}
@@ -1192,6 +1790,58 @@ export const TaskManagerApp: React.FC = () => {
         onPromoteToProject={handlePromoteTaskToProject}
         onDeleteTask={(t) => setTaskToDelete(t)}
         setTriageTask={setTriageTask}
+      />
+
+      {/* Drawer / Sheet de Leitura e Edição da Anotação */}
+      <NoteEditorSheet
+        note={selectedNote}
+        isOpen={Boolean(selectedNote)}
+        folders={noteFolders}
+        onClose={() => setSelectedNote(null)}
+        onUpdateNote={handleUpdateNote}
+        onDeleteNote={(n) => setNoteToDelete(n)}
+      />
+
+      {/* Modal de Criação de Pasta de Anotações */}
+      <NewFolderModal
+        isOpen={isNewFolderModalOpen}
+        parentFolder={
+          newFolderParentId
+            ? noteFolders.find((f) => f.id === newFolderParentId) ?? null
+            : null
+        }
+        onClose={() => setIsNewFolderModalOpen(false)}
+        onCreate={handleCreateFolder}
+      />
+
+      {/* Modal de Confirmação de Exclusão de Pasta */}
+      <ConfirmModal
+        isOpen={Boolean(folderToDelete)}
+        onClose={() => setFolderToDelete(null)}
+        onConfirm={handleConfirmDeleteFolder}
+        icon={<Trash2 className="w-5 h-5" />}
+        title="Excluir Pasta de Anotações?"
+        subtitle={folderToDelete?.name}
+        description="As anotações e subpastas desta pasta serão preservadas no diretório pai ou raiz."
+        confirmLabel="Excluir Pasta"
+        confirmClass="bg-red-600 hover:bg-red-500"
+      />
+
+      {/* Modal de Confirmação de Exclusão de Anotação */}
+      <ConfirmModal
+        isOpen={Boolean(noteToDelete)}
+        onClose={() => setNoteToDelete(null)}
+        onConfirm={handleConfirmDeleteNote}
+        icon={<Trash2 className="w-5 h-5" />}
+        title={noteToDelete?.deletedAt ? 'Apagar Definitivamente?' : 'Mover para a Lixeira?'}
+        subtitle={noteToDelete?.title || 'Sem título'}
+        description={
+          noteToDelete?.deletedAt
+            ? 'Tem certeza que deseja remover esta anotação permanentemente? Esta ação não pode ser desfeita.'
+            : 'A anotação será enviada para a Lixeira e permanecerá salva por 30 dias antes de ser apagada definitivamente.'
+        }
+        confirmLabel={noteToDelete?.deletedAt ? 'Apagar Definitivamente' : 'Mover para Lixeira'}
+        confirmClass="bg-red-600 hover:bg-red-500"
       />
 
       {/* Modal de Criação de Projeto GTD */}
@@ -1249,22 +1899,37 @@ export const TaskManagerApp: React.FC = () => {
         onClose={() => setTaskToDelete(null)}
         onConfirm={handleConfirmDeleteTask}
         icon={<Trash2 className="w-5 h-5" />}
-        title="Excluir Tarefa?"
+        title={taskToDelete?.deletedAt ? 'Apagar Definitivamente?' : 'Mover para a Lixeira?'}
         subtitle={taskToDelete?.title}
         description={(() => {
           if (!taskToDelete) return '';
+          if (taskToDelete.deletedAt) {
+            return 'Esta tarefa será excluída permanentemente agora. Esta ação não pode ser desfeita.';
+          }
           const childCount = tasks.filter(
-            (t) => t.parentTaskId === taskToDelete.id
+            (t) => t.parentTaskId === taskToDelete.id && !t.deletedAt
           ).length;
           if (childCount > 0) {
-            return `Esta tarefa e suas ${childCount} subtarefa(s) vinculadas serão removidas permanentemente.`;
+            return `Esta tarefa e suas ${childCount} subtarefa(s) vinculadas serão enviadas para a Lixeira e ficarão guardadas por 30 dias antes de serem apagadas.`;
           }
           if (taskToDelete.recurrenceRule) {
-            return 'Esta tarefa recorrente e suas configurações de repetição serão removidas permanentemente.';
+            return 'Esta tarefa recorrente será enviada para a Lixeira e ficará guardada por 30 dias.';
           }
-          return 'Tem certeza que deseja excluir esta tarefa? Esta ação não pode ser desfeita.';
+          return 'A tarefa será enviada para a Lixeira e permanecerá salva por 30 dias antes de ser apagada definitivamente.';
         })()}
-        confirmLabel="Excluir Tarefa"
+        confirmLabel={taskToDelete?.deletedAt ? 'Apagar Definitivamente' : 'Mover para Lixeira'}
+        confirmClass="bg-red-600 hover:bg-red-500"
+      />
+
+      {/* Modal de Confirmação para Esvaziar Lixeira */}
+      <ConfirmModal
+        isOpen={isEmptyTrashModalOpen}
+        onClose={() => setIsEmptyTrashModalOpen(false)}
+        onConfirm={handleConfirmEmptyTrash}
+        icon={<Trash2 className="w-5 h-5" />}
+        title="Esvaziar Lixeira?"
+        description="Tem certeza que deseja apagar permanentemente todas as tarefas e anotações da lixeira? Esta operação não pode ser desfeita."
+        confirmLabel="Esvaziar Tudo"
         confirmClass="bg-red-600 hover:bg-red-500"
       />
 

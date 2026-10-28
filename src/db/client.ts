@@ -9,6 +9,7 @@ import { asc } from 'drizzle-orm';
 import * as schema from './schema';
 import type { TaskPriority, TaskStatus, RecurrenceMode } from './schema';
 import type { TaskReminder } from '../types/task';
+import type { UINote, UINoteFolder } from '../types/note';
 
 /**
  * Cliente Turso Cloud direto via HTTP/Hrana + Drizzle ORM
@@ -167,22 +168,26 @@ export const GTD_SYSTEM_LISTS: ReadonlyArray<schema.NewListRecord> = [
     sortOrder: 1,
   },
   {
-    id: 'waiting_for',
-    name: 'Aguardando',
-    color: '#f59e0b',
-    icon: 'clock',
-    isGtdSystem: true,
-    sortOrder: 2,
-  },
-  {
     id: 'someday',
     name: 'Algum Dia',
     color: '#8b5cf6',
     icon: 'sparkles',
     isGtdSystem: true,
-    sortOrder: 3,
+    sortOrder: 2,
   },
 ];
+
+export function getDefaultSystemLists(): ListRecordUI[] {
+  return GTD_SYSTEM_LISTS.map((sys) => ({
+    id: sys.id,
+    name: sys.name,
+    color: sys.color ?? '#6366f1',
+    icon: sys.icon ?? 'inbox',
+    isGtdSystem: true,
+    sortOrder: sys.sortOrder ?? 0,
+    createdAt: Date.now(),
+  }));
+}
 
 export interface TaskRecordUI {
   id: string;
@@ -201,6 +206,7 @@ export interface TaskRecordUI {
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
+  deletedAt?: number | null;
 }
 
 export type TaskRecordWithTags = TaskRecordUI;
@@ -227,8 +233,16 @@ export async function fetchListsFromDb(): Promise<ListRecordUI[]> {
         // Coluna já existe
       }
 
+      // 0.1 Migra tarefas da lista especial removida 'waiting_for' para 'inbox' e remove a lista
+      try {
+        await libsqlClient.execute("UPDATE tasks SET list_id = 'inbox' WHERE list_id = 'waiting_for'");
+        await libsqlClient.execute("DELETE FROM lists WHERE id = 'waiting_for'");
+      } catch {
+        // Ignora caso as tabelas ainda não existam
+      }
+
       // 1. Garante que todas as listas do sistema GTD existam no banco com INSERT OR IGNORE
-      const seedBatch = GTD_SYSTEM_LISTS.map((sysList) => ({
+      const systemListsBatch = GTD_SYSTEM_LISTS.map((sysList) => ({
         sql: `INSERT OR IGNORE INTO lists (id, name, color, icon, is_gtd_system, sort_order, created_at)
               VALUES (?, ?, ?, ?, ?, ?, ?)`,
         args: [
@@ -241,7 +255,7 @@ export async function fetchListsFromDb(): Promise<ListRecordUI[]> {
           Date.now(),
         ],
       }));
-      await libsqlClient.batch(seedBatch, 'write');
+      await libsqlClient.batch(systemListsBatch, 'write');
 
       // 2. Busca todas as listas ordenadas
       const current = await db
@@ -288,9 +302,14 @@ function parseSafeTimestamp(value: unknown): number | null {
 export async function fetchTasksFromDb(): Promise<TaskRecordUI[]> {
   return withDatabaseTimeout(
     async () => {
-      // 0. Garante defensivamente que a coluna de lembretes exista no SQLite/Turso
+      // 0. Garante defensivamente que colunas novas existam no SQLite/Turso
       try {
         await libsqlClient.execute('ALTER TABLE tasks ADD COLUMN reminders TEXT');
+      } catch {
+        // Coluna já existe
+      }
+      try {
+        await libsqlClient.execute('ALTER TABLE tasks ADD COLUMN deleted_at INTEGER');
       } catch {
         // Coluna já existe
       }
@@ -329,6 +348,7 @@ export async function fetchTasksFromDb(): Promise<TaskRecordUI[]> {
           createdAt: createdAtSafe,
           updatedAt: updatedAtSafe,
           completedAt: parseSafeTimestamp(t.completedAt),
+          deletedAt: parseSafeTimestamp(t.deletedAt),
         };
       });
     },
@@ -348,8 +368,8 @@ export async function createTaskInDb(task: TaskRecordUI): Promise<void> {
           sql: `INSERT OR REPLACE INTO tasks (
             id, title, description, status, priority, is_pinned, due_date,
             recurrence_rule, recurrence_mode, reminders, list_id, parent_task_id,
-            sort_order, created_at, updated_at, completed_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            sort_order, created_at, updated_at, completed_at, deleted_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           args: [
             task.id,
             task.title,
@@ -369,6 +389,7 @@ export async function createTaskInDb(task: TaskRecordUI): Promise<void> {
             task.createdAt,
             task.updatedAt,
             task.completedAt !== null ? task.completedAt : null,
+            task.deletedAt !== null && task.deletedAt !== undefined ? task.deletedAt : null,
           ],
         },
       ];
@@ -449,6 +470,10 @@ export async function updateTaskInDb(
       if (updates.completedAt !== undefined) {
         setClauses.push('completed_at = ?');
         setArgs.push(updates.completedAt !== null ? updates.completedAt : null);
+      }
+      if (updates.deletedAt !== undefined) {
+        setClauses.push('deleted_at = ?');
+        setArgs.push(updates.deletedAt !== null ? updates.deletedAt : null);
       }
 
       setArgs.push(taskId);
@@ -531,4 +556,171 @@ export async function deleteListInDb(listId: string): Promise<void> {
     DB_OPERATION_TIMEOUT_MS,
     'exclusão de projeto/lista'
   );
+}
+
+/**
+ * Garante defensivamente que as tabelas de notas e pastas existam
+ */
+export async function ensureNotesTablesExist(): Promise<void> {
+  try {
+    await libsqlClient.execute(`
+      CREATE TABLE IF NOT EXISTS note_folders (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        color TEXT NOT NULL DEFAULT '#8b5cf6',
+        icon TEXT NOT NULL DEFAULT 'folder',
+        parent_id TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+    await libsqlClient.execute(`
+      CREATE TABLE IF NOT EXISTS notes (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        folder_id TEXT,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        color TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER
+      )
+    `);
+    try {
+      await libsqlClient.execute('ALTER TABLE note_folders ADD COLUMN parent_id TEXT');
+    } catch {
+      // Coluna já existe
+    }
+    try {
+      await libsqlClient.execute('ALTER TABLE notes ADD COLUMN deleted_at INTEGER');
+    } catch {
+      // Coluna já existe
+    }
+  } catch {
+    // Tabelas já existem ou erro tolerado
+  }
+}
+
+/**
+ * Carrega todas as pastas de notas do Turso
+ */
+export async function fetchNoteFoldersFromDb(): Promise<UINoteFolder[]> {
+  return withDatabaseTimeout(
+    async () => {
+      await ensureNotesTablesExist();
+      const current = await db
+        .select()
+        .from(schema.noteFolders)
+        .orderBy(asc(schema.noteFolders.sortOrder));
+
+      return current.map((f) => ({
+        id: String(f.id),
+        name: String(f.name),
+        color: String(f.color),
+        icon: String(f.icon),
+        parentId: f.parentId ? String(f.parentId) : null,
+        sortOrder: Number(f.sortOrder ?? 0),
+        createdAt: parseSafeTimestamp(f.createdAt) ?? Date.now(),
+        updatedAt: parseSafeTimestamp(f.updatedAt) ?? Date.now(),
+      }));
+    },
+    DB_OPERATION_TIMEOUT_MS,
+    'carregamento de pastas de notas'
+  );
+}
+
+/**
+ * Carrega todas as notas cadastradas no Turso
+ */
+export async function fetchNotesFromDb(): Promise<UINote[]> {
+  return withDatabaseTimeout(
+    async () => {
+      await ensureNotesTablesExist();
+      const current = await db
+        .select()
+        .from(schema.notes)
+        .orderBy(asc(schema.notes.sortOrder));
+
+      return current.map((n) => ({
+        id: String(n.id),
+        title: String(n.title),
+        content: String(n.content ?? ''),
+        folderId: n.folderId ? String(n.folderId) : null,
+        isPinned: Boolean(n.isPinned),
+        color: n.color ? String(n.color) : null,
+        sortOrder: Number(n.sortOrder ?? 0),
+        createdAt: parseSafeTimestamp(n.createdAt) ?? Date.now(),
+        updatedAt: parseSafeTimestamp(n.updatedAt) ?? Date.now(),
+        deletedAt: parseSafeTimestamp(n.deletedAt),
+      }));
+    },
+    DB_OPERATION_TIMEOUT_MS,
+    'carregamento de notas'
+  );
+}
+
+/**
+ * Limpa itens da lixeira que já expiraram a retenção de 30 dias (Tarefas e Anotações)
+ */
+export async function purgeExpiredTrashInDb(): Promise<void> {
+  const cutoffTime = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  try {
+    await libsqlClient.batch(
+      [
+        {
+          sql: 'DELETE FROM tasks WHERE parent_task_id IN (SELECT id FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at <= ?)',
+          args: [cutoffTime],
+        },
+        {
+          sql: 'DELETE FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at <= ?',
+          args: [cutoffTime],
+        },
+        {
+          sql: 'DELETE FROM notes WHERE deleted_at IS NOT NULL AND deleted_at <= ?',
+          args: [cutoffTime],
+        },
+      ],
+      'write'
+    );
+  } catch (err) {
+    console.error('Erro ao purgar itens expirados da lixeira no Turso:', err);
+  }
+}
+
+/**
+ * Esvazia imediatamente a lixeira, removendo permanentemente todas as tarefas e/ou notas
+ */
+export async function emptyTrashInDb(target: 'all' | 'tasks' | 'notes' = 'all'): Promise<void> {
+  const statements: InStatement[] = [];
+  if (target === 'all' || target === 'tasks') {
+    statements.push(
+      {
+        sql: 'DELETE FROM tasks WHERE parent_task_id IN (SELECT id FROM tasks WHERE deleted_at IS NOT NULL)',
+        args: [],
+      },
+      {
+        sql: 'DELETE FROM tasks WHERE deleted_at IS NOT NULL',
+        args: [],
+      }
+    );
+  }
+  if (target === 'all' || target === 'notes') {
+    statements.push({
+      sql: 'DELETE FROM notes WHERE deleted_at IS NOT NULL',
+      args: [],
+    });
+  }
+
+  if (statements.length > 0) {
+    await withDatabaseTimeout(
+      async () => {
+        await libsqlClient.batch(statements, 'write');
+      },
+      DB_OPERATION_TIMEOUT_MS,
+      'esvaziamento de lixeira'
+    );
+  }
 }

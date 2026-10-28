@@ -24,7 +24,6 @@
    - **Hoje:** Tarefas para o dia atual.
    - **Próximos 7 Dias:** Planejamento semanal.
    - **Ações Seguintes:** Ações imediatas sem compromisso de data rígida.
-   - **Aguardando:** Delegadas ou dependentes de terceiros.
    - **Algum Dia:** Ideias e projetos futuros.
 3. **TickTick Feel & Native Mobile:**
    - Checkbox estilizado com cor por prioridade (Alta: Vermelho, Média: Amarelo, Baixa: Azul).

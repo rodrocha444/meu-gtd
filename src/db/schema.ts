@@ -79,12 +79,14 @@ export const tasks = sqliteTable(
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
     completedAt: integer('completed_at', { mode: 'timestamp_ms' }),
+    deletedAt: integer('deleted_at', { mode: 'timestamp_ms' }),
   },
   (table) => [
     index('idx_tasks_list_status').on(table.listId, table.status),
     index('idx_tasks_due_date').on(table.dueDate),
     index('idx_tasks_parent').on(table.parentTaskId),
     index('idx_tasks_priority').on(table.priority),
+    index('idx_tasks_deleted_at').on(table.deletedAt),
   ]
 );
 
@@ -114,3 +116,77 @@ export type ListRecord = typeof lists.$inferSelect;
 export type NewListRecord = typeof lists.$inferInsert;
 export type TaskRecord = typeof tasks.$inferSelect;
 export type NewTaskRecord = typeof tasks.$inferInsert;
+
+/**
+ * 3. TABELA DE PASTAS DE ANOTAÇÕES (Note Folders)
+ */
+export const noteFolders = sqliteTable(
+  'note_folders',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    color: text('color').notNull().default('#8b5cf6'),
+    icon: text('icon').notNull().default('folder'),
+    parentId: text('parent_id'),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    index('idx_note_folders_sort_order').on(table.sortOrder),
+    index('idx_note_folders_parent_id').on(table.parentId),
+  ]
+);
+
+/**
+ * 4. TABELA DE ANOTAÇÕES / RASCUNHOS (Notes)
+ */
+export const notes = sqliteTable(
+  'notes',
+  {
+    id: text('id').primaryKey(),
+    title: text('title').notNull(),
+    content: text('content').notNull().default(''), // Markdown / texto
+    folderId: text('folder_id').references(() => noteFolders.id, {
+      onDelete: 'set null',
+    }),
+    isPinned: integer('is_pinned', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    color: text('color'),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    deletedAt: integer('deleted_at', { mode: 'timestamp_ms' }),
+  },
+  (table) => [
+    index('idx_notes_folder').on(table.folderId),
+    index('idx_notes_updated_at').on(table.updatedAt),
+    index('idx_notes_pinned').on(table.isPinned),
+    index('idx_notes_deleted_at').on(table.deletedAt),
+  ]
+);
+
+export const noteFoldersRelations = relations(noteFolders, ({ many }) => ({
+  notes: many(notes),
+}));
+
+export const notesRelations = relations(notes, ({ one }) => ({
+  folder: one(noteFolders, {
+    fields: [notes.folderId],
+    references: [noteFolders.id],
+  }),
+}));
+
+export type NoteFolderRecord = typeof noteFolders.$inferSelect;
+export type NewNoteFolderRecord = typeof noteFolders.$inferInsert;
+export type NoteRecord = typeof notes.$inferSelect;
+export type NewNoteRecord = typeof notes.$inferInsert;

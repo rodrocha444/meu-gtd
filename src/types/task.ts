@@ -33,6 +33,7 @@ export interface UITask {
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
+  deletedAt?: number | null;
 }
 
 export type SmartViewId =
@@ -42,8 +43,8 @@ export type SmartViewId =
   | 'next_7_days'
   | 'calendar'
   | 'next_actions'
-  | 'waiting_for'
   | 'someday'
   | 'projects'
   | 'completed'
+  | 'trash'
   | string;

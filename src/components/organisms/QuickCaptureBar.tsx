@@ -35,7 +35,7 @@ export const QuickCaptureBar: React.FC<QuickCaptureBarProps> = ({
           placeholder={
             activeView === 'completed'
               ? 'Capturar nova tarefa para Inbox...'
-              : 'Capturar... ex: "Aniversário da Ana 25/10 todo ano" ou "Trocar filtro a cada 15 dias após concluir"'
+              : 'Capturar... ex: "Checklist viatura M-1042 amanhã !alta ~operacional" ou "Treino TAF a cada 2 dias"'
           }
           className="flex-1 bg-transparent text-base sm:text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none"
         />

@@ -26,6 +26,20 @@
   box-sizing: border-box;
 }
 
+/* Habilita arrasto nativo em elementos marcados como draggable */
+[draggable="true"],
+[draggable="true"] * {
+  -webkit-user-drag: element !important;
+}
+
+/* Evita que botões, links e campos internos iniciem o arrasto do container */
+[draggable="true"] button,
+[draggable="true"] a,
+[draggable="true"] input,
+[draggable="true"] textarea {
+  -webkit-user-drag: none !important;
+}
+
 /* Habilita seleção de texto EXCLUSIVAMENTE em inputs e textareas */
 input,
 textarea,
@@ -132,4 +146,140 @@ body.is-native .bottom-keyboard-aware {
 body.keyboard-open .bottom-keyboard-aware {
   padding-bottom: 0.375rem !important;
   margin-bottom: 0 !important;
+}
+
+/* ==========================================================================
+   WYSIWYG RICH TEXT EDITOR STYLING
+   ========================================================================== */
+
+.wysiwyg-content {
+  color: #e4e4e7;
+  line-height: 1.625;
+  font-family: inherit;
+  outline: none;
+}
+
+.wysiwyg-content:empty:before {
+  content: attr(data-placeholder);
+  color: #52525b;
+  pointer-events: none;
+  display: block;
+}
+
+.wysiwyg-content h1 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #f4f4f5;
+  letter-spacing: -0.02em;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid rgba(63, 63, 70, 0.4);
+}
+
+.wysiwyg-content h2 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #e4e4e7;
+  letter-spacing: -0.015em;
+  margin-top: 0.875rem;
+  margin-bottom: 0.375rem;
+}
+
+.wysiwyg-content h3 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #a78bfa;
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.wysiwyg-content p {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.wysiwyg-content strong,
+.wysiwyg-content b {
+  font-weight: 700;
+  color: #fafafa;
+}
+
+.wysiwyg-content em,
+.wysiwyg-content i {
+  font-style: italic;
+  color: #f4f4f5;
+}
+
+.wysiwyg-content del,
+.wysiwyg-content s,
+.wysiwyg-content strike {
+  text-decoration: line-through;
+  color: #71717a;
+}
+
+.wysiwyg-content mark {
+  background-color: rgba(251, 191, 36, 0.2);
+  color: #fde047;
+  padding: 0.1rem 0.25rem;
+  border-radius: 0.25rem;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+}
+
+.wysiwyg-content blockquote {
+  border-left: 3px solid #8b5cf6;
+  background-color: rgba(139, 92, 246, 0.08);
+  padding: 0.375rem 0.75rem;
+  margin: 0.5rem 0;
+  border-radius: 0 0.5rem 0.5rem 0;
+  color: #d4d4d8;
+  font-style: italic;
+  font-size: 0.875rem;
+}
+
+.wysiwyg-content ul {
+  list-style-type: disc;
+  padding-left: 1.25rem;
+  margin: 0.375rem 0;
+}
+
+.wysiwyg-content ol {
+  list-style-type: decimal;
+  padding-left: 1.25rem;
+  margin: 0.375rem 0;
+}
+
+.wysiwyg-content li {
+  margin: 0.15rem 0;
+  color: #d4d4d8;
+}
+
+.wysiwyg-content pre {
+  background-color: #09090b;
+  border: 1px solid #27272a;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.75rem;
+  color: #d4d4d8;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+.wysiwyg-content code {
+  background-color: #27272a;
+  color: #c4b5fd;
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.375rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8em;
+}
+
+.wysiwyg-content hr {
+  border: none;
+  border-top: 1px solid rgba(63, 63, 70, 0.6);
+  margin: 1rem 0;
 }

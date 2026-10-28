@@ -57,9 +57,9 @@ import {
   Calendar,
   CalendarDays,
   Zap,
-  Clock,
   Sparkles,
   CheckCircle2,
+  Trash2,
 } from 'lucide-react';
 
 export const SMART_VIEW_ITEMS = [
@@ -67,7 +67,7 @@ export const SMART_VIEW_ITEMS = [
   { id: 'today', label: 'Hoje', icon: Calendar, color: 'text-emerald-400' },
   { id: 'next_days', label: 'Próximos Dias', icon: CalendarDays, color: 'text-indigo-400' },
   { id: 'next_actions', label: 'Ações Seguintes', icon: Zap, color: 'text-amber-400' },
-  { id: 'waiting_for', label: 'Aguardando', icon: Clock, color: 'text-orange-400' },
   { id: 'someday', label: 'Algum Dia', icon: Sparkles, color: 'text-purple-400' },
   { id: 'completed', label: 'Concluídas', icon: CheckCircle2, color: 'text-emerald-400' },
+  { id: 'trash', label: 'Lixeira', icon: Trash2, color: 'text-zinc-400' },
 ];

@@ -83,7 +83,7 @@ src/components/
 ## 4. Modelagem de Dados (`src/db/schema.ts`)
 
 - **`lists`**: `id`, `name`, `color`, `icon`, `is_gtd_system` (boolean), `sort_order`, `created_at`.
-  - *Listas GTD fixas:* `inbox`, `next_actions`, `waiting_for`, `someday`.
+  - *Listas GTD fixas:* `inbox`, `next_actions`, `someday`.
 - **`tasks`**:
   - `status`: `'pending' | 'completed'`.
   - `priority`: `0` (Nenhuma), `1` (Baixa), `2` (Média), `3` (Alta).
@@ -106,7 +106,6 @@ src/components/
 - **Próximos Dias:** Vencimento nos dias seguintes (`> hoje 23:59`, excluindo o dia atual).
 - **Calendário (`calendar`):** Visualização em grade Mensal ou Semanal com tarefas agendadas, eventos/aniversários e projeção de ocorrências recorrentes.
 - **Ações Seguintes (Next Actions):** Lista especial focada em execução. Por padrão, exibe apenas tarefas imediatas (sem data ou com vencimento em até 10 dias). Tarefas com vencimento superior a 10 dias são agrupadas em uma seção interna contraída por padrão chamada **Ações Futuras**.
-- **Aguardando (Waiting For):** Bloqueadas por terceiros / delegação.
 - **Algum Dia (Someday/Maybe):** Ideias futuras sem compromisso ativo.
 - **Concluídas (`completed`):** Lista separada e histórico centralizado de tarefas concluídas, além de agrupamento em seção retrátil "Concluídas (N)" nas listas ativas.
 
@@ -127,12 +126,21 @@ src/components/
 
 ---
 
-## 6. Diretrizes para Agentes de Código
+## 6. Diretrizes para Agentes de Código & Otimização de Velocidade ⚡
 
-- Mantenha `strict: true` e preserve tipagens de domínio (`TaskStatus`, `TaskPriority`, `RecurrenceMode`).
-- Sempre utilize componentes customizados em vez de elementos nativos legados da web (`<select>`, `<input type="date">`, etc.).
-- **Siga obrigatoriamente o Atomic Design (seção 3.5):** todo novo componente deve ser classificado e criado na pasta correta (`atoms/`, `molecules/`, `organisms/`, `templates/`, `ui/`).
-- **Reutilizar antes de recriar:** antes de qualquer novo componente, verifique os existentes. Se possível, estenda via props.
-- Evite refatorações em massa desnecessárias; use diffs pontuais.
-- Antes de commitar/encerrar tarefas, valide com `npm run build` (`tsc -b && vite build`).
+- **Zero Verificações Supérfluas (Economia Máxima de Latência & Tokens):**
+  - ❌ **Proibido executar verificações de lint** (`npm run lint`, `eslint`, etc.).
+  - ❌ **Proibido executar checagens de git desnecessárias** (`git status`, `git diff`, `git log`, etc.), a não ser que explicitamente pedido pelo usuário.
+  - ❌ **Sem rodadas extras de ferramentas:** ler diretamente os arquivos necessários com paths exatos em vez de fazer buscas globais lentas.
+- **Edições Cirúrgicas e Rápidas:**
+  - Prefira sempre `edit_file` pontual em vez de reescrever arquivos extensos.
+  - Modifique apenas o bloco de código estritamente necessário.
+- **Respostas Diretas e Sem Enrolação:**
+  - Seja conciso e direto ao ponto, reportando o que foi alterado sem redundâncias.
+- **Tipagem & Integridade:**
+  - Mantenha `strict: true` e preserve tipagens de domínio (`TaskStatus`, `TaskPriority`, `RecurrenceMode`).
+  - Sempre utilize componentes customizados em vez de elementos nativos legados da web (`<select>`, `<input type="date">`, etc.).
+- **Atomic Design Obrigatório (seção 3.5):**
+  - Todo novo componente deve ser classificado na pasta correta (`atoms/`, `molecules/`, `organisms/`, `templates/`, `ui/`).
+  - **Reutilizar antes de recriar:** busque componentes existentes e estenda via props.
 
