@@ -1,19 +1,16 @@
 import React from 'react';
-import { CheckSquare, FileText, GripVertical, Pin, Trash2 } from 'lucide-react';
+import { CheckSquare, FileText, GripVertical, Pin } from 'lucide-react';
 import { NativeBridge } from '../../lib/native';
-import { NoteFolderBadge } from '../atoms/NoteFolderBadge';
 import {
   htmlToPlainText,
   countChecklistInContent,
 } from '../../utils/markdownConverter';
-import type { UINote, UINoteFolder } from '../../types/note';
+import type { UINote } from '../../types/note';
 
 interface NoteCardProps {
   note: UINote;
-  folder?: UINoteFolder | null;
   onSelect: (note: UINote) => void;
   onTogglePin: (note: UINote) => void;
-  onDelete: (note: UINote) => void;
   layout?: 'grid' | 'list';
   isDragging?: boolean;
   onDragStart?: (e: React.DragEvent<HTMLDivElement>) => void;
@@ -39,10 +36,8 @@ function formatRelativeDate(timestamp: number): string {
 
 export const NoteCard: React.FC<NoteCardProps> = ({
   note,
-  folder,
   onSelect,
   onTogglePin,
-  onDelete,
   layout = 'list',
   isDragging = false,
   onDragStart,
@@ -74,6 +69,7 @@ export const NoteCard: React.FC<NoteCardProps> = ({
         onDragEnd={onDragEnd}
         onTouchStart={onTouchStart}
         onClick={() => {
+          if (isDragging) return;
           void NativeBridge.hapticLightImpact();
           onSelect(note);
         }}
@@ -111,9 +107,6 @@ export const NoteCard: React.FC<NoteCardProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {folder && (
-            <NoteFolderBadge name={folder.name} color={folder.color} size="xs" />
-          )}
           {totalChecklist > 0 && (
             <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400 bg-zinc-800/80 px-1.5 py-0.5 rounded-md border border-zinc-700/50">
               <CheckSquare className="w-3 h-3 text-violet-400" />
@@ -126,40 +119,24 @@ export const NoteCard: React.FC<NoteCardProps> = ({
             {formatRelativeDate(note.updatedAt)}
           </span>
 
-          <div className="flex items-center gap-0.5">
-            <button
-              type="button"
-              draggable={false}
-              onMouseDown={(e) => e.stopPropagation()}
-              aria-label={note.isPinned ? 'Desafixar anotação' : 'Fixar anotação'}
-              onClick={(e) => {
-                e.stopPropagation();
-                void NativeBridge.hapticLightImpact();
-                onTogglePin(note);
-              }}
-              className={`p-1 rounded-md transition-colors ${
-                note.isPinned
-                  ? 'text-amber-400 bg-amber-400/10'
-                  : 'text-zinc-500 hover:text-zinc-300 opacity-60 sm:opacity-0 sm:group-hover:opacity-100'
-              }`}
-            >
-              <Pin className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              draggable={false}
-              onMouseDown={(e) => e.stopPropagation()}
-              aria-label="Excluir anotação"
-              onClick={(e) => {
-                e.stopPropagation();
-                void NativeBridge.hapticLightImpact();
-                onDelete(note);
-              }}
-              className="p-1 rounded hover:bg-zinc-700/60 text-zinc-500 hover:text-red-400 opacity-60 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          </div>
+          <button
+            type="button"
+            draggable={false}
+            onMouseDown={(e) => e.stopPropagation()}
+            aria-label={note.isPinned ? 'Desafixar anotação' : 'Fixar anotação'}
+            onClick={(e) => {
+              e.stopPropagation();
+              void NativeBridge.hapticLightImpact();
+              onTogglePin(note);
+            }}
+            className={`p-1 rounded-md transition-colors ${
+              note.isPinned
+                ? 'text-amber-400 bg-amber-400/10'
+                : 'text-zinc-500 hover:text-zinc-300 opacity-60 sm:opacity-0 sm:group-hover:opacity-100'
+            }`}
+          >
+            <Pin className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
     );
@@ -172,87 +149,78 @@ export const NoteCard: React.FC<NoteCardProps> = ({
       onDragEnd={onDragEnd}
       onTouchStart={onTouchStart}
       onClick={() => {
+        if (isDragging) return;
         void NativeBridge.hapticLightImpact();
         onSelect(note);
       }}
-      className={`group relative border rounded-xl p-3 transition-all cursor-grab active:cursor-grabbing flex flex-col justify-between select-none min-h-[110px] ${
+      className={`group relative flex flex-col items-center justify-between text-center p-3 sm:p-3.5 rounded-2xl border transition-all cursor-grab active:cursor-grabbing select-none h-full min-h-[135px] ${
         isDragging
-          ? 'opacity-40 border-violet-500 bg-violet-500/10 shadow-2xl'
-          : 'bg-zinc-900/80 hover:bg-zinc-800/80 active:bg-zinc-800/90 border-zinc-800/90 hover:border-zinc-700/80'
+          ? 'opacity-40 border-violet-500 bg-violet-500/10 shadow-2xl scale-95 ring-2 ring-violet-500/50'
+          : 'bg-zinc-900/60 hover:bg-zinc-800/80 active:bg-zinc-800 border-zinc-800/80 hover:border-zinc-700/80 shadow-sm'
       }`}
     >
-      <div>
-        <div className="flex items-start justify-between gap-1.5 mb-1.5">
-          <div className="flex items-center gap-1.5 min-w-0 flex-1">
-            <div
-              title="Arraste para mover para uma pasta"
-              className="text-zinc-600 group-hover:text-zinc-400 p-0.5 rounded transition-colors"
-            >
-              <GripVertical className="w-3.5 h-3.5 shrink-0" />
-            </div>
-            <h3 className="font-semibold text-xs sm:text-sm text-zinc-100 line-clamp-1 group-hover:text-violet-300 transition-colors">
-              {note.title || 'Sem título'}
-            </h3>
-          </div>
-          <button
-            type="button"
-            draggable={false}
-            onMouseDown={(e) => e.stopPropagation()}
-            aria-label={note.isPinned ? 'Desafixar anotação' : 'Fixar anotação'}
-            onClick={(e) => {
-              e.stopPropagation();
-              void NativeBridge.hapticLightImpact();
-              onTogglePin(note);
-            }}
-            className={`p-1 rounded-md shrink-0 transition-colors ${
-              note.isPinned
-                ? 'text-amber-400 bg-amber-400/10'
-                : 'text-zinc-500 hover:text-zinc-300 opacity-60 sm:opacity-0 sm:group-hover:opacity-100'
-            }`}
-          >
-            <Pin className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        {contentSnippet ? (
-          <p className="text-xs text-zinc-400 line-clamp-2 leading-relaxed pl-5">
-            {contentSnippet}
-          </p>
-        ) : (
-          <p className="text-xs text-zinc-600 italic pl-5">Anotação vazia...</p>
-        )}
-      </div>
-
-      <div className="flex items-center justify-between pt-2 mt-2 border-t border-zinc-800/50 text-[10px] sm:text-[11px] text-zinc-500">
-        <div className="flex items-center gap-1.5 min-w-0">
-          {folder && (
-            <NoteFolderBadge name={folder.name} color={folder.color} size="xs" />
-          )}
-          {totalChecklist > 0 && (
-            <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400 bg-zinc-800/80 px-1.5 py-0.5 rounded-md border border-zinc-700/50">
-              <CheckSquare className="w-3 h-3 text-violet-400" />
-              <span>
-                {completedChecklist}/{totalChecklist}
-              </span>
-            </span>
-          )}
-          <span>{formatRelativeDate(note.updatedAt)}</span>
-        </div>
-
+      {/* Botões de Ação Flutuantes (Fixar / Excluir) estilo OS */}
+      <div className="opacity-0 group-hover:opacity-100 absolute top-2 right-2 flex items-center gap-1 transition-all z-10">
         <button
           type="button"
           draggable={false}
           onMouseDown={(e) => e.stopPropagation()}
-          aria-label="Excluir anotação"
+          aria-label={note.isPinned ? 'Desafixar anotação' : 'Fixar anotação'}
           onClick={(e) => {
             e.stopPropagation();
             void NativeBridge.hapticLightImpact();
-            onDelete(note);
+            onTogglePin(note);
           }}
-          className="p-1 rounded hover:bg-zinc-700/60 text-zinc-500 hover:text-red-400 opacity-60 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+          className={`p-1 rounded-lg border transition-colors ${
+            note.isPinned
+              ? 'text-amber-400 bg-amber-400/20 border-amber-500/40'
+              : 'text-zinc-400 hover:text-amber-300 bg-zinc-800/90 border-zinc-700/60'
+          }`}
+          title={note.isPinned ? 'Desafixar anotação' : 'Fixar anotação'}
         >
-          <Trash2 className="w-3.5 h-3.5" />
+          <Pin className="w-3 h-3" />
         </button>
+      </div>
+
+      {/* Ícone de Documento / Arquivo Estilo OS */}
+      <div className="relative my-auto flex items-center justify-center pt-1 pb-1">
+        <div className="w-12 h-14 rounded-xl bg-gradient-to-b from-zinc-800/90 to-zinc-900/90 border border-zinc-700/80 group-hover:border-violet-500/50 shadow-md flex flex-col items-center justify-center p-2 relative overflow-hidden transition-transform duration-200 group-hover:scale-105">
+          {/* Canto dobrado clássico de documento OS */}
+          <div className="absolute top-0 right-0 w-3 h-3 bg-zinc-700/70 border-b border-l border-zinc-600/70 rounded-bl-sm" />
+
+          <FileText className="w-5 h-5 text-zinc-400 group-hover:text-violet-400 transition-colors mb-1" />
+
+          {/* Linhas simuladas de texto do arquivo */}
+          <div className="w-6 h-0.5 bg-zinc-600/60 rounded-full mb-0.5" />
+          <div className="w-4 h-0.5 bg-zinc-600/40 rounded-full" />
+        </div>
+
+        {/* Badge de fixado no canto do documento */}
+        {note.isPinned && (
+          <div className="absolute -top-1.5 -left-1.5 p-1 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-400 shadow-sm">
+            <Pin className="w-2.5 h-2.5 fill-amber-400" />
+          </div>
+        )}
+
+        {/* Badge de progresso do checklist */}
+        {totalChecklist > 0 && (
+          <span className="absolute -bottom-1 -right-1.5 inline-flex items-center gap-0.5 px-1 py-0.2 rounded-full text-[9px] font-bold bg-zinc-900/95 border border-zinc-700/80 text-violet-300 shadow">
+            <CheckSquare className="w-2.5 h-2.5 text-violet-400" />
+            <span>
+              {completedChecklist}/{totalChecklist}
+            </span>
+          </span>
+        )}
+      </div>
+
+      {/* Título e Metadados abaixo do ícone (como pastas/arquivos de OS) */}
+      <div className="w-full flex flex-col items-center min-w-0 mt-1">
+        <h4 className="font-medium text-xs sm:text-sm text-zinc-200 group-hover:text-white transition-colors line-clamp-2 w-full break-words text-center leading-tight">
+          {note.title || 'Sem título'}
+        </h4>
+        <div className="flex items-center justify-center gap-1 text-[10px] text-zinc-500 group-hover:text-zinc-400 truncate w-full text-center mt-0.5">
+          <span>{formatRelativeDate(note.updatedAt)}</span>
+        </div>
       </div>
     </div>
   );

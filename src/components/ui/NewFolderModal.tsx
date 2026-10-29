@@ -19,15 +19,19 @@ const FOLDER_PRESET_COLORS = [
 interface NewFolderModalProps {
   isOpen: boolean;
   parentFolder?: UINoteFolder | null;
+  initialFolder?: UINoteFolder | null;
   onClose: () => void;
   onCreate: (name: string, color: string, parentId?: string | null) => void;
+  onUpdate?: (folderId: string, updates: { name: string; color: string }) => void;
 }
 
 export const NewFolderModal: React.FC<NewFolderModalProps> = ({
   isOpen,
   parentFolder,
+  initialFolder,
   onClose,
   onCreate,
+  onUpdate,
 }) => {
   const [name, setName] = useState('');
   const [color, setColor] = useState(FOLDER_PRESET_COLORS[0] ?? '#8b5cf6');
@@ -35,12 +39,20 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      if (initialFolder) {
+        setName(initialFolder.name);
+        setColor(initialFolder.color);
+      } else {
+        setName('');
+        setColor(FOLDER_PRESET_COLORS[0] ?? '#8b5cf6');
+      }
       const timer = setTimeout(() => {
         inputRef.current?.focus();
+        inputRef.current?.select();
       }, 60);
       return () => clearTimeout(timer);
     }
-  }, [isOpen]);
+  }, [isOpen, initialFolder]);
 
   if (!isOpen) return null;
 
@@ -48,7 +60,11 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
     e.preventDefault();
     const clean = name.trim();
     if (!clean) return;
-    onCreate(clean, color, parentFolder?.id ?? null);
+    if (initialFolder && onUpdate) {
+      onUpdate(initialFolder.id, { name: clean, color });
+    } else {
+      onCreate(clean, color, parentFolder?.id ?? null);
+    }
     setName('');
     setColor(FOLDER_PRESET_COLORS[0] ?? '#8b5cf6');
   };
@@ -78,10 +94,18 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
             </div>
             <div>
               <span className="text-[11px] font-semibold uppercase tracking-wider text-violet-400">
-                {parentFolder ? `Subpasta de "${parentFolder.name}"` : 'Diretório Raiz'}
+                {initialFolder
+                  ? 'Configurações da Pasta'
+                  : parentFolder
+                  ? `Subpasta de "${parentFolder.name}"`
+                  : 'Diretório Raiz'}
               </span>
               <h3 className="text-sm font-bold text-zinc-100">
-                {parentFolder ? 'Nova Subpasta' : 'Nova Pasta'}
+                {initialFolder
+                  ? 'Renomear Pasta'
+                  : parentFolder
+                  ? 'Nova Subpasta'
+                  : 'Nova Pasta'}
               </h3>
             </div>
           </div>
@@ -148,7 +172,7 @@ export const NewFolderModal: React.FC<NewFolderModalProps> = ({
               disabled={!name.trim()}
               className="px-4 py-2 rounded-xl text-xs font-semibold bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              Criar Pasta
+              {initialFolder ? 'Salvar Alterações' : 'Criar Pasta'}
             </button>
           </div>
         </form>

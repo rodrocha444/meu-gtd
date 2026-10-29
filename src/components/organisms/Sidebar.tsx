@@ -41,6 +41,7 @@ interface SidebarProps {
   onCreateProject: () => void;
   getTaskCountForView: (viewId: string) => number;
   onMoveNoteToFolder?: (noteId: string, folderId: string | null) => void;
+  onMoveFolderToFolder?: (folderId: string, targetParentId: string | null) => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -65,6 +66,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onCreateProject,
   getTaskCountForView,
   onMoveNoteToFolder,
+  onMoveFolderToFolder,
 }) => {
   const customProjects = lists.filter((l) => !l.isGtdSystem);
 
@@ -340,19 +342,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <button
               type="button"
               onDragOver={(e) => {
-                if (!onMoveNoteToFolder) return;
+                if (!onMoveNoteToFolder && !onMoveFolderToFolder) return;
                 e.preventDefault();
                 e.dataTransfer.dropEffect = 'move';
               }}
               onDrop={(e) => {
-                if (!onMoveNoteToFolder) return;
                 e.preventDefault();
-                const id =
-                  e.dataTransfer.getData('text/plain') ||
-                  e.dataTransfer.getData('application/x-note-id');
-                if (id) {
+                const folderId = e.dataTransfer.getData('application/x-folder-id');
+                const noteId =
+                  e.dataTransfer.getData('application/x-note-id') ||
+                  (!folderId ? e.dataTransfer.getData('text/plain') : null);
+
+                if (folderId && onMoveFolderToFolder) {
                   void NativeBridge.hapticMediumImpact();
-                  onMoveNoteToFolder(id, null);
+                  onMoveFolderToFolder(folderId, null);
+                } else if (noteId && onMoveNoteToFolder) {
+                  void NativeBridge.hapticMediumImpact();
+                  onMoveNoteToFolder(noteId, null);
                 }
               }}
               onClick={() => {
@@ -447,19 +453,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     key={folder.id}
                     type="button"
                     onDragOver={(e) => {
-                      if (!onMoveNoteToFolder) return;
+                      if (!onMoveNoteToFolder && !onMoveFolderToFolder) return;
                       e.preventDefault();
                       e.dataTransfer.dropEffect = 'move';
                     }}
                     onDrop={(e) => {
-                      if (!onMoveNoteToFolder) return;
                       e.preventDefault();
-                      const id =
-                        e.dataTransfer.getData('text/plain') ||
-                        e.dataTransfer.getData('application/x-note-id');
-                      if (id) {
+                      const folderId = e.dataTransfer.getData('application/x-folder-id');
+                      const noteId =
+                        e.dataTransfer.getData('application/x-note-id') ||
+                        (!folderId ? e.dataTransfer.getData('text/plain') : null);
+
+                      if (folderId && onMoveFolderToFolder) {
                         void NativeBridge.hapticMediumImpact();
-                        onMoveNoteToFolder(id, folder.id);
+                        onMoveFolderToFolder(folderId, folder.id);
+                      } else if (noteId && onMoveNoteToFolder) {
+                        void NativeBridge.hapticMediumImpact();
+                        onMoveNoteToFolder(noteId, folder.id);
                       }
                     }}
                     onClick={() => {
@@ -493,6 +503,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   onDropNote={
                     onMoveNoteToFolder
                       ? (noteId) => onMoveNoteToFolder(noteId, folder.id)
+                      : undefined
+                  }
+                  onDropFolder={
+                    onMoveFolderToFolder
+                      ? (folderId) => onMoveFolderToFolder(folderId, folder.id)
                       : undefined
                   }
                 />

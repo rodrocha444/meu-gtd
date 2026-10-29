@@ -12,6 +12,7 @@ interface FolderListItemProps {
   onSelect: (folderId: string) => void;
   onDelete?: (folder: UINoteFolder) => void;
   onDropNote?: (noteId: string) => void;
+  onDropFolder?: (draggedFolderId: string) => void;
 }
 
 export const FolderListItem: React.FC<FolderListItemProps> = ({
@@ -23,43 +24,61 @@ export const FolderListItem: React.FC<FolderListItemProps> = ({
   onSelect,
   onDelete,
   onDropNote,
+  onDropFolder,
 }) => {
   const [isDragOver, setIsDragOver] = React.useState(false);
 
+  const handleDragStart = (e: React.DragEvent<HTMLDivElement>) => {
+    e.dataTransfer.setData('application/x-folder-id', folder.id);
+    e.dataTransfer.setData('text/plain', folder.id);
+    e.dataTransfer.effectAllowed = 'move';
+    void NativeBridge.hapticLightImpact();
+  };
+
   return (
     <div
+      draggable={true}
+      onDragStart={handleDragStart}
       onDragOver={(e) => {
-        if (!onDropNote) return;
+        if (!onDropNote && !onDropFolder) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
       }}
       onDragEnter={(e) => {
-        if (!onDropNote) return;
+        if (!onDropNote && !onDropFolder) return;
         e.preventDefault();
         setIsDragOver(true);
       }}
       onDragLeave={(e) => {
-        if (!onDropNote) return;
+        if (!onDropNote && !onDropFolder) return;
         if (!e.currentTarget.contains(e.relatedTarget as Node)) {
           setIsDragOver(false);
         }
       }}
       onDrop={(e) => {
-        if (!onDropNote) return;
+        if (!onDropNote && !onDropFolder) return;
         e.preventDefault();
         setIsDragOver(false);
-        const id =
-          e.dataTransfer.getData('text/plain') ||
-          e.dataTransfer.getData('application/x-note-id');
-        if (id) {
+        const draggedFolderId = e.dataTransfer.getData('application/x-folder-id');
+        const noteId =
+          e.dataTransfer.getData('application/x-note-id') ||
+          (!draggedFolderId ? e.dataTransfer.getData('text/plain') : null);
+
+        if (draggedFolderId && onDropFolder) {
+          if (draggedFolderId !== folder.id) {
+            void NativeBridge.hapticMediumImpact();
+            onDropFolder(draggedFolderId);
+          }
+        } else if (noteId && onDropNote) {
           void NativeBridge.hapticMediumImpact();
-          onDropNote(id);
+          onDropNote(noteId);
         }
       }}
+      data-folder-drop-id={folder.id}
       style={{
         paddingLeft: level > 0 ? `${12 + level * 12}px` : undefined,
       }}
-      className={`group relative flex items-center justify-between w-full px-3 py-2 rounded-xl text-xs font-medium transition-all ${
+      className={`group relative flex items-center justify-between w-full px-3 py-2 rounded-xl text-xs font-medium cursor-grab active:cursor-grabbing transition-all select-none ${
         isDragOver
           ? 'scale-105 ring-2 ring-violet-500 bg-violet-500/20 text-white shadow-lg'
           : isActive
@@ -69,6 +88,7 @@ export const FolderListItem: React.FC<FolderListItemProps> = ({
     >
       <button
         type="button"
+        draggable={false}
         onClick={() => {
           void NativeBridge.hapticLightImpact();
           onSelect(folder.id);
@@ -96,6 +116,7 @@ export const FolderListItem: React.FC<FolderListItemProps> = ({
           {onDelete && (
             <button
               type="button"
+              draggable={false}
               aria-label={`Excluir pasta ${folder.name}`}
               onClick={(e) => {
                 e.stopPropagation();

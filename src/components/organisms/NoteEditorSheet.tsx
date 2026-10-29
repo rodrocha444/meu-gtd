@@ -16,6 +16,8 @@ import {
 import {
   markdownToHtml,
   htmlToPlainText,
+  createChecklistRowHtml,
+  normalizeChecklistHtml,
 } from '../../utils/markdownConverter';
 import type { UINote, UINoteFolder } from '../../types/note';
 
@@ -53,7 +55,7 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
       setIsPinned(note.isPinned);
       setPreviewMode('edit');
 
-      const initialHtml = markdownToHtml(note.content);
+      const initialHtml = normalizeChecklistHtml(markdownToHtml(note.content));
       setRawHtml(initialHtml);
 
       if (editorRef.current && !isInternalTypingRef.current) {
@@ -134,8 +136,43 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
         document.execCommand('insertHorizontalRule', false);
         break;
       case 'checklist': {
-        const itemHtml = `<div data-checklist-row="true" data-checked="false" class="checklist-row flex items-start gap-2.5 my-1.5 select-none"><button type="button" data-checklist-toggle="true" contenteditable="false" class="w-4 h-4 rounded-md border border-zinc-600 bg-zinc-900 text-violet-400 text-xs flex items-center justify-center shrink-0 mt-0.5 cursor-pointer hover:border-violet-400"><span data-checklist-icon="true">☐</span></button><span data-checklist-text="true" class="flex-1 outline-none">Novo item</span></div><p><br></p>`;
-        document.execCommand('insertHTML', false, itemHtml);
+        const sel = window.getSelection();
+        let existingText = '';
+        let targetBlock: HTMLElement | null = null;
+
+        if (sel && sel.rangeCount > 0) {
+          const anchor = sel.anchorNode;
+          const parentEl = anchor instanceof HTMLElement ? anchor : anchor?.parentElement;
+          targetBlock = parentEl?.closest('p, div, h1, h2, h3, li') as HTMLElement | null;
+          if (
+            targetBlock &&
+            editorRef.current?.contains(targetBlock) &&
+            !targetBlock.closest('[data-checklist-row="true"]')
+          ) {
+            existingText = targetBlock.textContent?.trim() || '';
+          }
+        }
+
+        const itemHtml = createChecklistRowHtml(existingText, false);
+
+        if (targetBlock && targetBlock !== editorRef.current && targetBlock.parentNode) {
+          const tempDiv = document.createElement('div');
+          tempDiv.innerHTML = itemHtml;
+          const newRow = tempDiv.firstElementChild as HTMLElement;
+          if (newRow) {
+            targetBlock.parentNode.replaceChild(newRow, targetBlock);
+            const textSpan = newRow.querySelector('[data-checklist-text="true"]');
+            if (textSpan) {
+              const newRange = document.createRange();
+              newRange.selectNodeContents(textSpan);
+              newRange.collapse(false);
+              sel?.removeAllRanges();
+              sel?.addRange(newRange);
+            }
+          }
+        } else {
+          document.execCommand('insertHTML', false, itemHtml);
+        }
         break;
       }
       case 'code': {
@@ -151,6 +188,157 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
     handleContentSync();
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (previewMode !== 'edit') return;
+
+    if (e.key === 'Enter' && !e.shiftKey) {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return;
+      const range = sel.getRangeAt(0);
+
+      const anchor = sel.anchorNode;
+      const parentEl = anchor instanceof HTMLElement ? anchor : anchor?.parentElement;
+      const checklistRow = parentEl?.closest('[data-checklist-row="true"]') as HTMLElement | null;
+
+      if (checklistRow) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const checklistText = checklistRow.querySelector('[data-checklist-text="true"]') as HTMLElement | null;
+        const fullText = checklistText?.textContent?.replace(/\u200B/g, '').trim() || '';
+
+        // Se o item estiver vazio: converte a linha em parágrafo normal para sair suavemente do modo checklist
+        if (!fullText) {
+          const p = document.createElement('p');
+          p.innerHTML = '<br>';
+          checklistRow.parentNode?.replaceChild(p, checklistRow);
+
+          const newRange = document.createRange();
+          newRange.setStart(p, 0);
+          newRange.collapse(true);
+          sel.removeAllRanges();
+          sel.addRange(newRange);
+
+          handleContentSync();
+          return;
+        }
+
+        // Se tiver texto: divide na posição do cursor
+        let textBefore = '';
+        let textAfter = '';
+
+        if (checklistText) {
+          try {
+            const preRange = range.cloneRange();
+            preRange.selectNodeContents(checklistText);
+            preRange.setEnd(range.startContainer, range.startOffset);
+            const caretPos = preRange.toString().length;
+
+            const originalText = checklistText.innerText || checklistText.textContent || '';
+            textBefore = originalText.slice(0, caretPos);
+            textAfter = originalText.slice(caretPos);
+
+            checklistText.textContent = textBefore || '';
+            if (!checklistText.textContent) {
+              checklistText.innerHTML = '<br>';
+            }
+          } catch {
+            textBefore = checklistText.textContent || '';
+            textAfter = '';
+          }
+        }
+
+        // Cria o próximo item de checklist desmarcado
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = createChecklistRowHtml(textAfter, false);
+        const newRow = tempDiv.firstElementChild as HTMLElement;
+
+        if (newRow) {
+          if (checklistRow.nextSibling) {
+            checklistRow.parentNode?.insertBefore(newRow, checklistRow.nextSibling);
+          } else {
+            checklistRow.parentNode?.appendChild(newRow);
+          }
+
+          const newTextSpan = newRow.querySelector('[data-checklist-text="true"]');
+          if (newTextSpan) {
+            const newRange = document.createRange();
+            newRange.selectNodeContents(newTextSpan);
+            newRange.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(newRange);
+          }
+        }
+
+        handleContentSync();
+        return;
+      }
+    }
+
+    if (e.key === 'Backspace') {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return;
+      const range = sel.getRangeAt(0);
+
+      const anchor = sel.anchorNode;
+      const parentEl = anchor instanceof HTMLElement ? anchor : anchor?.parentElement;
+      const checklistRow = parentEl?.closest('[data-checklist-row="true"]') as HTMLElement | null;
+
+      if (checklistRow) {
+        const checklistText = checklistRow.querySelector('[data-checklist-text="true"]') as HTMLElement | null;
+        const currentText = checklistText?.textContent?.replace(/\u200B/g, '').trim() || '';
+
+        // Se o checklist está vazio e o usuário aperta backspace: converte para parágrafo normal
+        if (!currentText) {
+          e.preventDefault();
+          e.stopPropagation();
+
+          const p = document.createElement('p');
+          p.innerHTML = '<br>';
+          checklistRow.parentNode?.replaceChild(p, checklistRow);
+
+          const newRange = document.createRange();
+          newRange.setStart(p, 0);
+          newRange.collapse(true);
+          sel.removeAllRanges();
+          sel.addRange(newRange);
+
+          handleContentSync();
+          return;
+        }
+
+        // Se o cursor estiver no início absoluto do texto: converte em parágrafo preservando o texto
+        if (checklistText && range.collapsed) {
+          try {
+            const preRange = range.cloneRange();
+            preRange.selectNodeContents(checklistText);
+            preRange.setEnd(range.startContainer, range.startOffset);
+            if (preRange.toString().length === 0) {
+              e.preventDefault();
+              e.stopPropagation();
+
+              const p = document.createElement('p');
+              p.textContent = checklistText.textContent || '';
+              if (!p.textContent) p.innerHTML = '<br>';
+              checklistRow.parentNode?.replaceChild(p, checklistRow);
+
+              const newRange = document.createRange();
+              newRange.setStart(p.firstChild || p, 0);
+              newRange.collapse(true);
+              sel.removeAllRanges();
+              sel.addRange(newRange);
+
+              handleContentSync();
+              return;
+            }
+          } catch {
+            // fallback silencioso
+          }
+        }
+      }
+    }
+  };
+
   const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     const toggleBtn = target.closest('[data-checklist-toggle]');
@@ -163,23 +351,20 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
         const isChecked = row.getAttribute('data-checked') === 'true';
         const nextChecked = !isChecked;
         row.setAttribute('data-checked', String(nextChecked));
-        const icon = row.querySelector('[data-checklist-icon]');
-        const textSpan = row.querySelector('[data-checklist-text]');
-        if (nextChecked) {
-          if (icon) icon.textContent = '☑';
-          row.classList.add('opacity-60');
-          toggleBtn.classList.remove('border-zinc-600', 'bg-zinc-900', 'text-violet-400');
-          toggleBtn.classList.add('border-violet-600', 'bg-violet-600', 'text-white');
-          if (textSpan) textSpan.classList.add('line-through', 'text-zinc-500');
-        } else {
-          if (icon) icon.textContent = '☐';
-          row.classList.remove('opacity-60');
-          toggleBtn.classList.remove('border-violet-600', 'bg-violet-600', 'text-white');
-          toggleBtn.classList.add('border-zinc-600', 'bg-zinc-900', 'text-violet-400');
-          if (textSpan) textSpan.classList.remove('line-through', 'text-zinc-500');
+
+        // Assegura classe nativa moderna e ícone SVG caso seja legado
+        if (!toggleBtn.classList.contains('checklist-toggle')) {
+          toggleBtn.className = 'checklist-toggle';
         }
+        if (!toggleBtn.querySelector('.checklist-icon')) {
+          toggleBtn.innerHTML =
+            '<svg class="checklist-icon" viewBox="0 0 14 14" fill="none"><path d="M3 7.5L5.5 10L11 4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        }
+
         handleContentSync();
       }
+    } else if (e.target === e.currentTarget && editorRef.current) {
+      editorRef.current.focus();
     }
   };
 
@@ -189,21 +374,23 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/75 backdrop-blur-xs p-0 md:p-6"
+      className="absolute inset-0 z-50 flex flex-col justify-end md:justify-center md:items-center bg-black/75 backdrop-blur-xs p-0 pt-[calc(var(--safe-top,0px)+0.5rem)] md:p-6"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
           paddingBottom:
-            'max(1.25rem, calc(var(--safe-bottom, 0px) - var(--keyboard-height, 0px)))',
+            'max(0.75rem, calc(var(--safe-bottom, 0px) - var(--keyboard-height, 0px)))',
         }}
-        className="w-full max-w-2xl h-[92vh] md:h-[85vh] flex flex-col bg-zinc-900 border-t md:border border-zinc-800 rounded-t-3xl md:rounded-2xl shadow-2xl overflow-hidden"
+        className="w-full max-w-2xl h-full max-h-[calc(100%-0.25rem)] md:h-[85vh] md:max-h-[85vh] flex flex-col bg-zinc-900 border-t md:border border-zinc-800 rounded-t-3xl md:rounded-2xl shadow-2xl overflow-hidden"
       >
-        <SheetHandle />
+        <div className="shrink-0">
+          <SheetHandle />
+        </div>
 
         {/* Barra superior de ações */}
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800/80 bg-zinc-950/40">
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800/80 bg-zinc-950/40 shrink-0">
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -273,7 +460,7 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
         </div>
 
         {/* Pasta atual & metadados */}
-        <div className="px-5 pt-3 pb-1 flex items-center justify-between gap-3">
+        <div className="px-5 pt-3 pb-1 flex items-center justify-between gap-3 shrink-0">
           {currentFolder ? (
             <NoteFolderBadge
               name={currentFolder.name}
@@ -291,7 +478,7 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
         </div>
 
         {/* Título da Nota */}
-        <div className="px-5 pt-1 pb-2">
+        <div className="px-5 pt-1 pb-2 shrink-0">
           <input
             type="text"
             value={title}
@@ -316,6 +503,7 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
             contentEditable={previewMode === 'edit'}
             suppressContentEditableWarning
             onInput={handleContentSync}
+            onKeyDown={handleKeyDown}
             data-placeholder="Digite sua anotação aqui... Use a barra acima para formatar (títulos, negrito, itálico, listas, tarefas)."
             className={`wysiwyg-content min-h-[320px] pb-10 ${
               previewMode === 'preview' ? 'cursor-default select-text' : 'cursor-text'

@@ -180,29 +180,31 @@ export const RichMarkdownRenderer: React.FC<RichMarkdownRendererProps> = ({
       elements.push(
         <div
           key={`check-${i}`}
-          onClick={() => {
-            if (onToggleChecklist) {
-              void NativeBridge.hapticLightImpact();
-              onToggleChecklist(lineIndex, !isChecked);
-            }
-          }}
-          className={`flex items-start gap-2.5 my-1 p-1 rounded-lg hover:bg-zinc-800/40 cursor-pointer select-none transition-colors ${
-            isChecked ? 'opacity-60' : ''
-          }`}
+          data-checklist-row="true"
+          data-checked={isChecked}
+          className="checklist-row"
         >
-          <div
-            className={`w-4 h-4 rounded-md border flex items-center justify-center shrink-0 mt-0.5 transition-all ${
-              isChecked
-                ? 'bg-violet-600 border-violet-600 text-white'
-                : 'border-zinc-600 hover:border-violet-400 bg-zinc-900'
-            }`}
+          <button
+            type="button"
+            aria-label={isChecked ? 'Marcar como pendente' : 'Marcar como concluída'}
+            onClick={() => {
+              if (onToggleChecklist) {
+                void NativeBridge.hapticLightImpact();
+                onToggleChecklist(lineIndex, !isChecked);
+              }
+            }}
+            className={`checklist-toggle ${isChecked ? 'is-checked' : ''}`}
           >
-            {isChecked && <Check className="w-3 h-3 stroke-[3]" />}
-          </div>
+            <Check className="checklist-icon" />
+          </button>
           <span
-            className={`text-sm leading-relaxed ${
-              isChecked ? 'line-through text-zinc-500' : 'text-zinc-200'
-            }`}
+            onClick={() => {
+              if (onToggleChecklist) {
+                void NativeBridge.hapticLightImpact();
+                onToggleChecklist(lineIndex, !isChecked);
+              }
+            }}
+            className="checklist-text cursor-pointer"
           >
             {renderInlineFormatting(text)}
           </span>

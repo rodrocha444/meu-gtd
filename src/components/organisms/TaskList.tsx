@@ -229,6 +229,7 @@ export const TaskList: React.FC<TaskListProps> = ({
       {/* Seção Retrátil de Concluídas */}
       {completedTasks.length > 0 && (
         <CompletedTasksSection
+          key={`completed-${activeView}`}
           completedTasks={completedTasks}
           allTasks={allTasks}
           listMap={listMap}

@@ -17,6 +17,7 @@ interface TaskMetaBadgesProps {
   formattedDate: string | null;
   formattedCompletion: string | null;
   reminders?: TaskReminder[];
+  isOverdue?: boolean;
 }
 
 export const TaskMetaBadges: React.FC<TaskMetaBadgesProps> = ({
@@ -30,6 +31,7 @@ export const TaskMetaBadges: React.FC<TaskMetaBadgesProps> = ({
   formattedDate,
   formattedCompletion,
   reminders,
+  isOverdue = false,
 }) => (
   <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
     <span className="text-[11px] text-zinc-400 bg-zinc-800/90 px-1.5 py-0.5 rounded">
@@ -65,7 +67,10 @@ export const TaskMetaBadges: React.FC<TaskMetaBadgesProps> = ({
     )}
 
     {formattedDate && !formattedCompletion && (
-      <DateBadge label={formattedDate} variant="due" />
+      <DateBadge
+        label={formattedDate}
+        variant={isOverdue ? 'overdue' : 'due'}
+      />
     )}
 
     {status === 'pending' && reminders && reminders.length > 0 && (

@@ -1,22 +1,18 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   ArrowLeft,
   Check,
-  ChevronRight,
-  FileText,
   Folder,
   FolderPlus,
   LayoutGrid,
   List,
   Pin,
   Plus,
-  Search,
-  X,
 } from 'lucide-react';
 import { NativeBridge } from '../../lib/native';
 import { FolderTile } from '../molecules/FolderTile';
 import { NoteCard } from '../molecules/NoteCard';
-import { htmlToPlainText } from '../../utils/markdownConverter';
+import { isDescendantFolder } from '../../utils/folderUtils';
 import type { UINote, UINoteFolder } from '../../types/note';
 
 interface NotesViewProps {
@@ -31,7 +27,10 @@ interface NotesViewProps {
   onCreateFolder: (parentId?: string | null) => void;
   onDeleteFolder?: (folder: UINoteFolder) => void;
   onMoveNoteToFolder: (noteId: string, folderId: string | null) => void;
+  onMoveFolderToFolder?: (folderId: string, targetParentId: string | null) => void;
 }
+
+const DRAG_ACTIVATION_DELAY_MS = 450;
 
 export const NotesView: React.FC<NotesViewProps> = ({
   notes,
@@ -41,26 +40,51 @@ export const NotesView: React.FC<NotesViewProps> = ({
   onSelectNote,
   onCreateNote,
   onTogglePin,
-  onDeleteNote,
+  onDeleteNote: _onDeleteNote,
   onCreateFolder,
   onDeleteFolder,
   onMoveNoteToFolder,
+  onMoveFolderToFolder,
 }) => {
-  const [searchQuery, setSearchQuery] = useState('');
   const [layout, setLayout] = useState<'grid' | 'list'>(() => {
     try {
-      return (localStorage.getItem('meu_gtd_notes_layout') as 'grid' | 'list') || 'list';
+      return (localStorage.getItem('meu_gtd_notes_layout') as 'grid' | 'list') || 'grid';
     } catch {
-      return 'list';
+      return 'grid';
     }
   });
 
   const [draggedNoteId, setDraggedNoteId] = useState<string | null>(null);
-  const [dragOverCrumbId, setDragOverCrumbId] = useState<string | null>(null);
+  const [draggedFolderId, setDraggedFolderId] = useState<string | null>(null);
+  const [dragOverGoUp, setDragOverGoUp] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  const touchDragRef = useRef<{ noteId: string } | null>(null);
+  const touchDragRef = useRef<{ noteId?: string; folderId?: string } | null>(null);
+  const dragTimeoutRef = useRef<number | null>(null);
+  const pendingTouchRef = useRef<{
+    noteId?: string;
+    folderId?: string;
+    startX: number;
+    startY: number;
+  } | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
+
+  const cancelPendingDrag = () => {
+    if (dragTimeoutRef.current !== null) {
+      window.clearTimeout(dragTimeoutRef.current);
+      dragTimeoutRef.current = null;
+    }
+    pendingTouchRef.current = null;
+  };
+
+  useEffect(() => {
+    return () => {
+      cancelPendingDrag();
+      if (toastTimeoutRef.current !== null) {
+        window.clearTimeout(toastTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleSetLayout = (newLayout: 'grid' | 'list') => {
     void NativeBridge.hapticLightImpact();
@@ -85,22 +109,9 @@ export const NotesView: React.FC<NotesViewProps> = ({
     return folderMap.get(activeFolderId) ?? null;
   }, [activeFolderId, folderMap]);
 
-  // Caminho hierárquico de Breadcrumbs (da raiz até a pasta ativa)
-  const breadcrumbPath = useMemo(() => {
-    if (activeFolderId === 'all') return [];
-    const chain: UINoteFolder[] = [];
-    let curr: UINoteFolder | undefined = folderMap.get(activeFolderId);
-    while (curr) {
-      chain.unshift(curr);
-      curr = curr.parentId ? folderMap.get(curr.parentId) : undefined;
-    }
-    return chain;
-  }, [activeFolderId, folderMap]);
-
   const handleDropOnFolder = (noteId: string, targetFolderId: string | null) => {
     onMoveNoteToFolder(noteId, targetFolderId);
     setDraggedNoteId(null);
-    setDragOverCrumbId(null);
 
     const folderName = targetFolderId
       ? folderMap.get(targetFolderId)?.name ?? 'Pasta'
@@ -115,16 +126,94 @@ export const NotesView: React.FC<NotesViewProps> = ({
     }, 2500);
   };
 
-  // Suporte a Touch Dragging no Mobile
-  const handleTouchStart = (noteId: string) => {
-    touchDragRef.current = { noteId };
-    setDraggedNoteId(noteId);
+  const handleDropFolderOnFolder = (folderId: string, targetFolderId: string | null) => {
+    if (folderId === targetFolderId) return;
+
+    if (targetFolderId && isDescendantFolder(folders, folderId, targetFolderId)) {
+      if (toastTimeoutRef.current) {
+        window.clearTimeout(toastTimeoutRef.current);
+      }
+      setToastMessage('Não é possível mover uma pasta para dentro de si mesma ou de suas subpastas');
+      toastTimeoutRef.current = window.setTimeout(() => {
+        setToastMessage(null);
+      }, 3000);
+      setDraggedFolderId(null);
+      return;
+    }
+
+    if (onMoveFolderToFolder) {
+      onMoveFolderToFolder(folderId, targetFolderId);
+    }
+    setDraggedFolderId(null);
+
+    const sourceFolder = folderMap.get(folderId);
+    const targetFolder = targetFolderId ? folderMap.get(targetFolderId) : null;
+    const folderName = sourceFolder?.name ?? 'Pasta';
+    const destName = targetFolder ? `"${targetFolder.name}"` : 'Diretório Raiz (Anotações)';
+
+    if (toastTimeoutRef.current) {
+      window.clearTimeout(toastTimeoutRef.current);
+    }
+    setToastMessage(`Pasta "${folderName}" movida para ${destName}`);
+    toastTimeoutRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+    }, 2500);
+  };
+
+  // Suporte a Touch Dragging no Mobile com atraso intencional (press & hold)
+  const handleTouchStartNote = (noteId: string, e: React.TouchEvent) => {
+    cancelPendingDrag();
+    const touch = e.touches[0];
+    if (!touch) return;
+
+    pendingTouchRef.current = {
+      noteId,
+      startX: touch.clientX,
+      startY: touch.clientY,
+    };
+
+    dragTimeoutRef.current = window.setTimeout(() => {
+      void NativeBridge.hapticMediumImpact();
+      touchDragRef.current = { noteId };
+      setDraggedNoteId(noteId);
+      dragTimeoutRef.current = null;
+    }, DRAG_ACTIVATION_DELAY_MS);
+  };
+
+  const handleTouchStartFolder = (folderId: string, e: React.TouchEvent) => {
+    cancelPendingDrag();
+    const touch = e.touches[0];
+    if (!touch) return;
+
+    pendingTouchRef.current = {
+      folderId,
+      startX: touch.clientX,
+      startY: touch.clientY,
+    };
+
+    dragTimeoutRef.current = window.setTimeout(() => {
+      void NativeBridge.hapticMediumImpact();
+      touchDragRef.current = { folderId };
+      setDraggedFolderId(folderId);
+      dragTimeoutRef.current = null;
+    }, DRAG_ACTIVATION_DELAY_MS);
   };
 
   const handleTouchMove = (e: React.TouchEvent) => {
-    if (!touchDragRef.current) return;
     const touch = e.touches[0];
     if (!touch) return;
+
+    // Se ainda estiver aguardando o tempo de ativação e o usuário mover o dedo (ex: rolando a lista), cancela o arrasto
+    if (pendingTouchRef.current && !touchDragRef.current) {
+      const dx = Math.abs(touch.clientX - pendingTouchRef.current.startX);
+      const dy = Math.abs(touch.clientY - pendingTouchRef.current.startY);
+      if (dx > 10 || dy > 10) {
+        cancelPendingDrag();
+      }
+      return;
+    }
+
+    if (!touchDragRef.current) return;
     const elem = document.elementFromPoint(touch.clientX, touch.clientY);
     const dropTarget = elem?.closest('[data-folder-drop-id]');
     if (dropTarget) {
@@ -133,22 +222,41 @@ export const NotesView: React.FC<NotesViewProps> = ({
   };
 
   const handleTouchEnd = (e: React.TouchEvent) => {
+    // Se soltou o toque antes de atingir o tempo de ativação, cancela o timer
+    cancelPendingDrag();
+
     if (!touchDragRef.current) return;
-    const noteId = touchDragRef.current.noteId;
+    const { noteId, folderId } = touchDragRef.current;
     const touch = e.changedTouches[0];
-    if (touch && noteId) {
+    if (touch) {
       const elem = document.elementFromPoint(touch.clientX, touch.clientY);
       const dropTarget = elem?.closest('[data-folder-drop-id]');
       if (dropTarget) {
-        const targetFolderId = dropTarget.getAttribute('data-folder-drop-id');
-        handleDropOnFolder(
-          noteId,
-          targetFolderId === 'root' ? null : targetFolderId
-        );
+        const rawTargetId = dropTarget.getAttribute('data-folder-drop-id');
+        const targetFolderId =
+          rawTargetId === 'root'
+            ? null
+            : rawTargetId === 'parent'
+            ? currentFolder?.parentId ?? null
+            : rawTargetId;
+
+        if (folderId) {
+          handleDropFolderOnFolder(folderId, targetFolderId);
+        } else if (noteId) {
+          handleDropOnFolder(noteId, targetFolderId);
+        }
       }
     }
     touchDragRef.current = null;
     setDraggedNoteId(null);
+    setDraggedFolderId(null);
+  };
+
+  const handleTouchCancel = () => {
+    cancelPendingDrag();
+    touchDragRef.current = null;
+    setDraggedNoteId(null);
+    setDraggedFolderId(null);
   };
 
   // Subpastas no diretório atual (ou raiz)
@@ -156,31 +264,19 @@ export const NotesView: React.FC<NotesViewProps> = ({
     const targetParentId = activeFolderId === 'all' ? null : activeFolderId;
     return folders
       .filter((f) => (targetParentId === null ? !f.parentId : f.parentId === targetParentId))
-      .filter((f) => {
-        if (!searchQuery.trim()) return true;
-        return f.name.toLowerCase().includes(searchQuery.toLowerCase().trim());
-      })
       .sort((a, b) => a.sortOrder - b.sortOrder);
-  }, [folders, activeFolderId, searchQuery]);
+  }, [folders, activeFolderId]);
 
-  // Anotações no diretório atual (ou raiz)
+  // Anotações no diretório atual (ou notas sem pasta quando no diretório raiz)
   const currentNotes = useMemo(() => {
     const targetFolderId = activeFolderId === 'all' ? null : activeFolderId;
     return notes
       .filter((n) => (targetFolderId === null ? !n.folderId : n.folderId === targetFolderId))
-      .filter((n) => {
-        if (!searchQuery.trim()) return true;
-        const q = searchQuery.toLowerCase().trim();
-        return (
-          n.title.toLowerCase().includes(q) ||
-          htmlToPlainText(n.content).toLowerCase().includes(q)
-        );
-      })
       .sort((a, b) => {
         if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
         return b.updatedAt - a.updatedAt;
       });
-  }, [notes, activeFolderId, searchQuery]);
+  }, [notes, activeFolderId]);
 
   const pinnedNotes = useMemo(
     () => currentNotes.filter((n) => n.isPinned),
@@ -214,197 +310,65 @@ export const NotesView: React.FC<NotesViewProps> = ({
       className="flex flex-col h-full space-y-4"
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchCancel}
     >
       {/* =========================================================================
-          BARRA DE ENDEREÇOS ESTILO EXPLORADOR DE ARQUIVOS DO WINDOWS
+          BARRA DE FERRAMENTAS / CABEÇALHO DE AÇÕES
           ========================================================================= */}
-      <div className="flex flex-col gap-2.5 bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-2.5 sm:p-3 shadow-lg shadow-black/20">
-        {/* Linha 1: Navegação de Caminho (Breadcrumbs) e Ações de Diretório */}
+      <div className="flex items-center justify-between gap-2 bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-2.5 sm:p-3 shadow-lg shadow-black/20">
         <div className="flex items-center gap-2">
-          {/* Botão Subir Nível / Voltar (←) estilo Windows Explorer */}
-          <button
-            type="button"
-            disabled={activeFolderId === 'all'}
-            onClick={handleGoUp}
-            className={`p-2 rounded-xl border transition-all ${
-              activeFolderId !== 'all'
-                ? 'bg-zinc-800 border-zinc-700 text-zinc-100 hover:bg-zinc-700 active:scale-95 shadow-sm'
-                : 'bg-zinc-900/40 border-zinc-800/40 text-zinc-600 cursor-not-allowed opacity-40'
-            }`}
-            title="Subir um nível de pasta"
-            aria-label="Subir nível"
-          >
-            <ArrowLeft className="w-4 h-4" />
-          </button>
-
-          {/* Barra de Caminho (Address Bar) com Drop Zones para cada nível */}
-          <div className="flex-1 min-w-0 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs font-medium text-zinc-300 overflow-x-auto native-scroll-container">
-            {/* Crumb: Raiz (Anotações) - também funciona como Drop Zone */}
+          {/* Botão Subir Nível / Voltar (←) se estiver dentro de uma pasta */}
+          {activeFolderId !== 'all' && (
             <button
               type="button"
-              data-folder-drop-id="root"
+              data-folder-drop-id="parent"
               onDragOver={(e) => {
                 e.preventDefault();
                 e.dataTransfer.dropEffect = 'move';
               }}
               onDragEnter={(e) => {
                 e.preventDefault();
-                setDragOverCrumbId('root');
+                setDragOverGoUp(true);
               }}
               onDragLeave={(e) => {
                 if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                  setDragOverCrumbId(null);
+                  setDragOverGoUp(false);
                 }
               }}
               onDrop={(e) => {
                 e.preventDefault();
-                const id =
-                  e.dataTransfer.getData('text/plain') ||
+                setDragOverGoUp(false);
+                const fId =
+                  e.dataTransfer.getData('application/x-folder-id') ||
+                  draggedFolderId;
+                const nId =
                   e.dataTransfer.getData('application/x-note-id') ||
+                  (!fId ? e.dataTransfer.getData('text/plain') : null) ||
                   draggedNoteId;
-                if (id) handleDropOnFolder(id, null);
+                const targetParent = currentFolder?.parentId ?? null;
+                if (fId) {
+                  handleDropFolderOnFolder(fId, targetParent);
+                } else if (nId) {
+                  handleDropOnFolder(nId, targetParent);
+                }
               }}
-              onClick={() => {
-                void NativeBridge.hapticLightImpact();
-                onSelectFolder('all');
-              }}
-              className={`hover:text-violet-300 hover:underline flex items-center gap-1 shrink-0 px-1 py-0.5 rounded transition-all ${
-                dragOverCrumbId === 'root'
-                  ? 'bg-violet-500/25 ring-2 ring-violet-400 text-white'
-                  : activeFolderId === 'all'
-                  ? 'text-violet-400 font-semibold'
-                  : 'text-zinc-400'
+              onClick={handleGoUp}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border active:scale-95 shadow-sm text-xs font-medium transition-all ${
+                dragOverGoUp
+                  ? 'ring-2 ring-violet-400 bg-violet-500/30 text-white border-violet-400 scale-105'
+                  : 'bg-zinc-800 border-zinc-700 text-zinc-100 hover:bg-zinc-700'
               }`}
-              title="Ir para o diretório raiz (Solte aqui para mover para a raiz)"
+              title={`Voltar / Subir um nível (Solte aqui para mover para ${
+                currentFolder?.parentId ? 'a pasta superior' : 'o diretório raiz'
+              })`}
+              aria-label="Subir nível"
             >
-              <Folder className="w-3.5 h-3.5 text-violet-400 shrink-0 pointer-events-none" />
-              <span className="pointer-events-none">Anotações</span>
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Voltar</span>
             </button>
+          )}
 
-            {/* Crumbs das Subpastas no Caminho Hierárquico */}
-            {breadcrumbPath.map((folder, idx) => {
-              const isLast = idx === breadcrumbPath.length - 1;
-              const isDragOver = dragOverCrumbId === folder.id;
-
-              return (
-                <React.Fragment key={folder.id}>
-                  <ChevronRight className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
-                  <button
-                    type="button"
-                    data-folder-drop-id={folder.id}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.dataTransfer.dropEffect = 'move';
-                    }}
-                    onDragEnter={(e) => {
-                      e.preventDefault();
-                      setDragOverCrumbId(folder.id);
-                    }}
-                    onDragLeave={(e) => {
-                      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                        setDragOverCrumbId(null);
-                      }
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      const id =
-                        e.dataTransfer.getData('text/plain') ||
-                        e.dataTransfer.getData('application/x-note-id') ||
-                        draggedNoteId;
-                      if (id) handleDropOnFolder(id, folder.id);
-                    }}
-                    onClick={() => {
-                      void NativeBridge.hapticLightImpact();
-                      onSelectFolder(folder.id);
-                    }}
-                    className={`flex items-center gap-1.5 shrink-0 px-2 py-0.5 rounded-md border transition-all ${
-                      isDragOver
-                        ? 'ring-2 ring-violet-400 bg-violet-500/30 text-white border-violet-400'
-                        : isLast
-                        ? 'font-semibold text-zinc-100 bg-zinc-900 border-zinc-800'
-                        : 'text-zinc-400 hover:text-zinc-200 bg-zinc-950 border-zinc-850 hover:bg-zinc-900'
-                    }`}
-                    title={`Abrir "${folder.name}" (Solte aqui para mover)`}
-                  >
-                    <Folder
-                      className="w-3.5 h-3.5 shrink-0 pointer-events-none"
-                      style={{ color: folder.color }}
-                    />
-                    <span className="truncate max-w-[130px] pointer-events-none">
-                      {folder.name}
-                    </span>
-                  </button>
-                </React.Fragment>
-              );
-            })}
-          </div>
-
-          {/* Botões de Ação no Diretório Atual */}
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => {
-                void NativeBridge.hapticLightImpact();
-                onCreateFolder(activeFolderId === 'all' ? null : activeFolderId);
-              }}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700/80 text-zinc-300 border border-zinc-700/60 text-xs font-semibold transition-all active:scale-95"
-              title={
-                currentFolder
-                  ? `Criar subpasta dentro de "${currentFolder.name}"`
-                  : 'Criar pasta no diretório raiz'
-              }
-            >
-              <FolderPlus className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span className="hidden sm:inline">
-                {currentFolder ? 'Nova Subpasta' : 'Nova Pasta'}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                void NativeBridge.hapticMediumImpact();
-                onCreateNote(activeFolderId === 'all' ? null : activeFolderId);
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold shadow-lg shadow-violet-900/20 transition-all active:scale-95"
-              title={
-                currentFolder
-                  ? `Criar anotação dentro de "${currentFolder.name}"`
-                  : 'Criar anotação no diretório raiz'
-              }
-            >
-              <Plus className="w-3.5 h-3.5 shrink-0" />
-              <span>Nova Nota</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Linha 2: Busca e Alternâncias de Visualização */}
-        <div className="flex items-center justify-between gap-2.5">
-          <div className="relative flex-1">
-            <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={
-                currentFolder
-                  ? `Pesquisar dentro de "${currentFolder.name}"...`
-                  : 'Pesquisar no diretório raiz...'
-              }
-              className="w-full pl-8 pr-8 py-1.5 rounded-xl bg-zinc-950/70 border border-zinc-800 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-violet-500 transition-colors"
-            />
-            {searchQuery && (
-              <button
-                type="button"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-
+          {/* Alternâncias de Visualização (Lista / Grade) */}
           <div className="flex items-center bg-zinc-950/80 p-0.5 rounded-xl border border-zinc-800 shrink-0">
             <button
               type="button"
@@ -421,28 +385,71 @@ export const NotesView: React.FC<NotesViewProps> = ({
             </button>
             <button
               type="button"
-              aria-label="Exibir em Grade"
+              aria-label="Exibir em Matriz"
               onClick={() => handleSetLayout('grid')}
               className={`p-1.5 rounded-lg transition-colors ${
                 layout === 'grid'
                   ? 'bg-zinc-800 text-zinc-100'
                   : 'text-zinc-500 hover:text-zinc-300'
               }`}
-              title="Exibição em Grade (Ícones)"
+              title="Exibição em Matriz (Ícones / Pastas OS)"
             >
               <LayoutGrid className="w-3.5 h-3.5" />
             </button>
           </div>
+        </div>
+
+        {/* Botões de Ação no Diretório Atual */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              void NativeBridge.hapticLightImpact();
+              onCreateFolder(activeFolderId === 'all' ? null : activeFolderId);
+            }}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700/80 text-zinc-300 border border-zinc-700/60 text-xs font-semibold transition-all active:scale-95"
+            title={
+              currentFolder
+                ? `Criar subpasta dentro de "${currentFolder.name}"`
+                : 'Criar pasta no diretório raiz'
+            }
+          >
+            <FolderPlus className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="hidden sm:inline">
+              {currentFolder ? 'Nova Subpasta' : 'Nova Pasta'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              void NativeBridge.hapticMediumImpact();
+              onCreateNote(activeFolderId === 'all' ? null : activeFolderId);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold shadow-lg shadow-violet-900/20 transition-all active:scale-95"
+            title={
+              currentFolder
+                ? `Criar anotação dentro de "${currentFolder.name}"`
+                : 'Criar anotação no diretório raiz'
+            }
+          >
+            <Plus className="w-3.5 h-3.5 shrink-0" />
+            <span>Nova Nota</span>
+          </button>
         </div>
       </div>
 
       {/* =========================================================================
           FEEDBACK FLUTUANTE DE ARRASTO E STATUS
           ========================================================================= */}
-      {draggedNoteId && (
+      {(draggedNoteId || draggedFolderId) && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 pointer-events-none flex items-center gap-2 py-2.5 px-4 rounded-xl bg-zinc-900/95 border border-violet-500/60 text-violet-200 text-xs font-semibold shadow-2xl backdrop-blur-md animate-pulse">
           <Folder className="w-4 h-4 text-violet-400 shrink-0" />
-          <span>Solte sobre uma pasta ou na barra de endereços para mover</span>
+          <span>
+            {draggedFolderId
+              ? 'Solte sobre outra pasta ou no botão Voltar para mover a pasta'
+              : 'Solte sobre uma pasta para mover a anotação'}
+          </span>
         </div>
       )}
 
@@ -454,27 +461,55 @@ export const NotesView: React.FC<NotesViewProps> = ({
       )}
 
       {/* =========================================================================
-          CONTEÚDO PRINCIPAL: DIRETÓRIO ATUAL (WINDOWS FILE EXPLORER)
+          CONTEÚDO PRINCIPAL: LISTAGEM UNIFICADA (PASTAS E ANOTAÇÕES)
           ========================================================================= */}
-      <div className="space-y-6 pb-6">
-        {/* SEÇÃO 1: PASTAS / SUBPASTAS DO DIRETÓRIO ATUAL */}
-        {currentSubfolders.length > 0 && (
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between px-1">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
-                <Folder className="w-3.5 h-3.5 text-zinc-500" />
-                <span>
-                  {currentFolder
-                    ? `Subpastas de "${currentFolder.name}" (${currentSubfolders.length})`
-                    : `Pastas (${currentSubfolders.length})`}
-                </span>
-              </span>
-              <span className="text-[11px] text-zinc-500">
-                Arraste notas sobre uma pasta para organizá-las
-              </span>
+      <div className="space-y-4 pb-6">
+        {/* Anotações Fixadas */}
+        {pinnedNotes.length > 0 && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-amber-400/90 px-1">
+              <Pin className="w-3.5 h-3.5" />
+              <span>Fixadas ({pinnedNotes.length})</span>
             </div>
+            <div
+              className={
+                layout === 'grid'
+                  ? 'grid grid-cols-2 min-[380px]:grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-2.5 sm:gap-3.5'
+                  : 'flex flex-col space-y-2'
+              }
+            >
+              {pinnedNotes.map((note) => (
+                <NoteCard
+                  key={note.id}
+                  note={note}
+                  onSelect={onSelectNote}
+                  onTogglePin={onTogglePin}
+                  layout={layout}
+                  isDragging={draggedNoteId === note.id}
+                  onDragStart={() => setDraggedNoteId(note.id)}
+                  onDragEnd={() => setDraggedNoteId(null)}
+                  onTouchStart={(e) => handleTouchStartNote(note.id, e)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5">
+        {/* Listagem Unificada de Pastas e Outras Anotações */}
+        {(currentSubfolders.length > 0 || unpinnedNotes.length > 0) && (
+          <div className="space-y-2">
+            {pinnedNotes.length > 0 && (
+              <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 px-1">
+                Outros ({currentSubfolders.length + unpinnedNotes.length})
+              </div>
+            )}
+            <div
+              className={
+                layout === 'grid'
+                  ? 'grid grid-cols-2 min-[380px]:grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-2.5 sm:gap-3.5'
+                  : 'flex flex-col space-y-2'
+              }
+            >
               {currentSubfolders.map((folder) => {
                 const { noteCount, subfolderCount } = getCountsForFolder(folder.id);
                 return (
@@ -483,118 +518,33 @@ export const NotesView: React.FC<NotesViewProps> = ({
                     folder={folder}
                     noteCount={noteCount}
                     subfolderCount={subfolderCount}
+                    layout={layout}
+                    isDragging={draggedFolderId === folder.id}
+                    onDragStart={() => setDraggedFolderId(folder.id)}
+                    onDragEnd={() => setDraggedFolderId(null)}
+                    onTouchStart={(e) => handleTouchStartFolder(folder.id, e)}
                     onOpen={(id) => onSelectFolder(id)}
                     onDelete={onDeleteFolder}
                     onDropNote={handleDropOnFolder}
+                    onDropFolder={handleDropFolderOnFolder}
                   />
                 );
               })}
 
-              {/* Bloco de Criar Nova Subpasta */}
-              <button
-                type="button"
-                onClick={() => {
-                  void NativeBridge.hapticLightImpact();
-                  onCreateFolder(activeFolderId === 'all' ? null : activeFolderId);
-                }}
-                className="flex items-center gap-3 p-3 rounded-2xl border border-dashed border-zinc-800 hover:border-violet-500/60 bg-zinc-950/30 hover:bg-zinc-900/50 text-zinc-400 hover:text-violet-300 text-xs font-semibold transition-all group active:scale-98"
-              >
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-zinc-900 border border-zinc-800 group-hover:border-violet-500/40 group-hover:bg-violet-500/10 shrink-0 transition-colors">
-                  <Plus className="w-5 h-5 text-zinc-500 group-hover:text-violet-400" />
-                </div>
-                <span>
-                  {currentFolder ? 'Criar Nova Subpasta...' : 'Criar Nova Pasta...'}
-                </span>
-              </button>
+              {unpinnedNotes.map((note) => (
+                <NoteCard
+                  key={note.id}
+                  note={note}
+                  onSelect={onSelectNote}
+                  onTogglePin={onTogglePin}
+                  layout={layout}
+                  isDragging={draggedNoteId === note.id}
+                  onDragStart={() => setDraggedNoteId(note.id)}
+                  onDragEnd={() => setDraggedNoteId(null)}
+                  onTouchStart={(e) => handleTouchStartNote(note.id, e)}
+                />
+              ))}
             </div>
-          </div>
-        )}
-
-        {/* Divisor suave se houver tanto subpastas quanto notas */}
-        {currentSubfolders.length > 0 && currentNotes.length > 0 && (
-          <div className="border-t border-zinc-800/60" />
-        )}
-
-        {/* SEÇÃO 2: ANOTAÇÕES DO DIRETÓRIO ATUAL */}
-        {currentNotes.length > 0 && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between px-1">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
-                <FileText className="w-3.5 h-3.5 text-zinc-500" />
-                <span>
-                  {currentFolder
-                    ? `Anotações em "${currentFolder.name}" (${currentNotes.length})`
-                    : `Anotações no Diretório Raiz (${currentNotes.length})`}
-                </span>
-              </span>
-            </div>
-
-            {/* Anotações Fixadas */}
-            {pinnedNotes.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-amber-400/90 px-1">
-                  <Pin className="w-3.5 h-3.5" />
-                  <span>Fixadas ({pinnedNotes.length})</span>
-                </div>
-                <div
-                  className={
-                    layout === 'grid'
-                      ? 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5'
-                      : 'flex flex-col space-y-2'
-                  }
-                >
-                  {pinnedNotes.map((note) => (
-                    <NoteCard
-                      key={note.id}
-                      note={note}
-                      folder={note.folderId ? folderMap.get(note.folderId) : null}
-                      onSelect={onSelectNote}
-                      onTogglePin={onTogglePin}
-                      onDelete={onDeleteNote}
-                      layout={layout}
-                      isDragging={draggedNoteId === note.id}
-                      onDragStart={() => setDraggedNoteId(note.id)}
-                      onDragEnd={() => setDraggedNoteId(null)}
-                      onTouchStart={() => handleTouchStart(note.id)}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Outras Anotações */}
-            {unpinnedNotes.length > 0 && (
-              <div className="space-y-2">
-                {pinnedNotes.length > 0 && (
-                  <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 px-1">
-                    Outras Anotações ({unpinnedNotes.length})
-                  </div>
-                )}
-                <div
-                  className={
-                    layout === 'grid'
-                      ? 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5'
-                      : 'flex flex-col space-y-2'
-                  }
-                >
-                  {unpinnedNotes.map((note) => (
-                    <NoteCard
-                      key={note.id}
-                      note={note}
-                      folder={note.folderId ? folderMap.get(note.folderId) : null}
-                      onSelect={onSelectNote}
-                      onTogglePin={onTogglePin}
-                      onDelete={onDeleteNote}
-                      layout={layout}
-                      isDragging={draggedNoteId === note.id}
-                      onDragStart={() => setDraggedNoteId(note.id)}
-                      onDragEnd={() => setDraggedNoteId(null)}
-                      onTouchStart={() => handleTouchStart(note.id)}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -605,16 +555,12 @@ export const NotesView: React.FC<NotesViewProps> = ({
               <Folder className="w-6 h-6" />
             </div>
             <h3 className="text-sm font-semibold text-zinc-200 mb-1">
-              {searchQuery
-                ? 'Nenhum item encontrado neste diretório'
-                : currentFolder
+              {currentFolder
                 ? `Esta pasta "${currentFolder.name}" está vazia`
                 : 'O diretório de anotações está vazio'}
             </h3>
             <p className="text-xs text-zinc-500 max-w-sm mb-4">
-              {searchQuery
-                ? 'Tente buscar com outros termos ou limpe o campo de pesquisa.'
-                : 'Crie anotações diretamente aqui ou organize em subpastas.'}
+              Crie anotações diretamente aqui ou organize em subpastas.
             </p>
             <div className="flex items-center gap-2">
               <button

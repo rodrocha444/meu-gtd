@@ -4,6 +4,7 @@ import {
   CalendarRange,
   ListFilter,
   Menu,
+  Pencil,
   Trash2,
 } from 'lucide-react';
 import { NativeBridge } from '../../lib/native';
@@ -28,6 +29,7 @@ interface MainHeaderProps {
   onDeleteCustomProject?: () => void;
   currentFolder?: UINoteFolder | null;
   onDeleteFolder?: () => void;
+  onRenameFolder?: (folder: UINoteFolder) => void;
   trashCount?: number;
   onEmptyTrash?: () => void;
 }
@@ -48,6 +50,7 @@ export const MainHeader: React.FC<MainHeaderProps> = ({
   onDeleteCustomProject,
   currentFolder,
   onDeleteFolder,
+  onRenameFolder,
   trashCount = 0,
   onEmptyTrash,
 }) => {
@@ -91,6 +94,23 @@ export const MainHeader: React.FC<MainHeaderProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Botão Renomear Pasta */}
+          {appMode === 'notes' && currentFolder && onRenameFolder && (
+            <button
+              type="button"
+              aria-label={`Renomear pasta ${currentFolder.name}`}
+              onClick={() => {
+                void NativeBridge.hapticLightImpact();
+                onRenameFolder(currentFolder);
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 active:scale-95 transition-all"
+              title={`Renomear pasta "${currentFolder.name}"`}
+            >
+              <Pencil className="w-3.5 h-3.5 text-violet-400" />
+              <span className="hidden sm:inline">Renomear</span>
+            </button>
+          )}
+
           {/* Botão Excluir Pasta de Anotações */}
           {appMode === 'notes' && currentFolder && onDeleteFolder && (
             <button

@@ -30,6 +30,7 @@ import {
   compareCompletedTasks,
 } from '../utils/taskSorter';
 import { getDefaultNoteFolders, getDefaultNotes } from '../utils/notesDefaults';
+import { isDescendantFolder } from '../utils/folderUtils';
 import { CalendarView } from './CalendarView';
 import type { CustomSelectOption } from './ui/CustomControls';
 import {
@@ -210,6 +211,7 @@ export const TaskManagerApp: React.FC = () => {
   const [selectedNote, setSelectedNote] = useState<UINote | null>(null);
   const [isNewFolderModalOpen, setIsNewFolderModalOpen] = useState<boolean>(false);
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
+  const [folderToEdit, setFolderToEdit] = useState<UINoteFolder | null>(null);
   const [folderToDelete, setFolderToDelete] = useState<UINoteFolder | null>(null);
   const [noteToDelete, setNoteToDelete] = useState<UINote | null>(null);
 
@@ -256,9 +258,9 @@ export const TaskManagerApp: React.FC = () => {
           ? t.status === 'completed'
           : t.status === 'pending' &&
             (viewId === 'today'
-              ? t.dueDate !== null && t.dueDate <= endOfTodayTime
+              ? t.listId !== 'inbox' && t.dueDate !== null && t.dueDate <= endOfTodayTime
               : viewId === 'next_days' || viewId === 'next_7_days'
-              ? t.dueDate !== null && t.dueDate > endOfTodayTime
+              ? t.listId !== 'inbox' && t.dueDate !== null && t.dueDate > endOfTodayTime
               : viewId === 'next_actions'
               ? t.listId === 'next_actions' &&
                 (t.dueDate === null || t.dueDate <= tenDaysTime)
@@ -502,17 +504,19 @@ export const TaskManagerApp: React.FC = () => {
         }
         if (activeView === 'today') {
           return (
-            (t.dueDate !== null &&
+            t.listId !== 'inbox' &&
+            ((t.dueDate !== null &&
               t.dueDate <= endOfToday.getTime() &&
               t.status === 'pending') ||
             (t.status === 'completed' &&
               t.completedAt !== null &&
               t.completedAt >= startOfToday.getTime() &&
-              t.completedAt <= endOfToday.getTime())
+              t.completedAt <= endOfToday.getTime()))
           );
         }
         if (activeView === 'next_days' || activeView === 'next_7_days') {
           return (
+            t.listId !== 'inbox' &&
             t.dueDate !== null &&
             t.dueDate > endOfToday.getTime() &&
             t.status === 'pending'
@@ -829,6 +833,40 @@ export const TaskManagerApp: React.FC = () => {
     void NativeBridge.hapticSwipeAction();
   };
 
+  const handleMoveFolderToFolder = (
+    folderId: string,
+    targetParentId: string | null
+  ) => {
+    // 1. Não mover para si mesma
+    if (folderId === targetParentId) return;
+
+    // 2. Não mover para suas próprias subpastas (prevenção de ciclos)
+    if (targetParentId && isDescendantFolder(noteFolders, folderId, targetParentId)) {
+      return;
+    }
+
+    const currentFolder = noteFolders.find((f) => f.id === folderId);
+    if (!currentFolder || currentFolder.parentId === targetParentId) return;
+
+    const now = Date.now();
+    const updatedFolders = noteFolders.map((f) =>
+      f.id === folderId ? { ...f, parentId: targetParentId, updatedAt: now } : f
+    );
+    noteFoldersRef.current = updatedFolders;
+    setNoteFolders(updatedFolders);
+    saveNotesCache(updatedFolders, notesRef.current);
+
+    enqueueMutation({
+      type: 'UPDATE_NOTE_FOLDER',
+      folderId,
+      updates: { parentId: targetParentId },
+      updatedAt: now,
+    });
+    setPendingCount(getPendingCount());
+    void NativeBridge.hapticSwipeAction();
+    void triggerSync();
+  };
+
   const handleOpenNewFolderModal = (parentId?: string | null) => {
     setNewFolderParentId(
       parentId !== undefined
@@ -869,6 +907,30 @@ export const TaskManagerApp: React.FC = () => {
     setPendingCount(getPendingCount());
     setIsNewFolderModalOpen(false);
     setActiveFolderId(newFolder.id);
+    void NativeBridge.hapticSwipeAction();
+    void triggerSync();
+  };
+
+  const handleUpdateFolder = (
+    folderId: string,
+    updates: { name: string; color: string }
+  ) => {
+    const now = Date.now();
+    const updatedFolders = noteFolders.map((f) =>
+      f.id === folderId ? { ...f, ...updates, updatedAt: now } : f
+    );
+    noteFoldersRef.current = updatedFolders;
+    setNoteFolders(updatedFolders);
+    saveNotesCache(updatedFolders, notesRef.current);
+
+    enqueueMutation({
+      type: 'UPDATE_NOTE_FOLDER',
+      folderId,
+      updates,
+      updatedAt: now,
+    });
+    setPendingCount(getPendingCount());
+    setFolderToEdit(null);
     void NativeBridge.hapticSwipeAction();
     void triggerSync();
   };
@@ -1585,6 +1647,7 @@ export const TaskManagerApp: React.FC = () => {
         totalNotesCount={totalNotesCount}
         trashNotesCount={trashNotesCount}
         onMoveNoteToFolder={handleMoveNoteToFolder}
+        onMoveFolderToFolder={handleMoveFolderToFolder}
         syncState={syncState}
         pendingCount={pendingCount}
         onSync={() => void handleManualSync()}
@@ -1615,6 +1678,7 @@ export const TaskManagerApp: React.FC = () => {
         totalNotesCount={totalNotesCount}
         trashNotesCount={trashNotesCount}
         onMoveNoteToFolder={handleMoveNoteToFolder}
+        onMoveFolderToFolder={handleMoveFolderToFolder}
         syncState={syncState}
         pendingCount={pendingCount}
         onSync={() => void handleManualSync()}
@@ -1666,6 +1730,7 @@ export const TaskManagerApp: React.FC = () => {
           onDeleteCustomProject={() => setProjectToDelete(currentCustomProject)}
           currentFolder={currentFolder}
           onDeleteFolder={() => currentFolder && setFolderToDelete(currentFolder)}
+          onRenameFolder={(f) => setFolderToEdit(f)}
           trashCount={trashTasks.length + trashNotes.length}
           onEmptyTrash={() => setIsEmptyTrashModalOpen(true)}
         />
@@ -1718,6 +1783,7 @@ export const TaskManagerApp: React.FC = () => {
               onCreateFolder={handleOpenNewFolderModal}
               onDeleteFolder={(f) => setFolderToDelete(f)}
               onMoveNoteToFolder={handleMoveNoteToFolder}
+              onMoveFolderToFolder={handleMoveFolderToFolder}
             />
           ) : isShowingCalendar ? (
             <CalendarView
@@ -1802,16 +1868,25 @@ export const TaskManagerApp: React.FC = () => {
         onDeleteNote={(n) => setNoteToDelete(n)}
       />
 
-      {/* Modal de Criação de Pasta de Anotações */}
+      {/* Modal de Criação / Edição de Pasta de Anotações */}
       <NewFolderModal
-        isOpen={isNewFolderModalOpen}
+        isOpen={isNewFolderModalOpen || folderToEdit !== null}
+        initialFolder={folderToEdit}
         parentFolder={
-          newFolderParentId
+          folderToEdit
+            ? folderToEdit.parentId
+              ? noteFolders.find((f) => f.id === folderToEdit.parentId) ?? null
+              : null
+            : newFolderParentId
             ? noteFolders.find((f) => f.id === newFolderParentId) ?? null
             : null
         }
-        onClose={() => setIsNewFolderModalOpen(false)}
+        onClose={() => {
+          setIsNewFolderModalOpen(false);
+          setFolderToEdit(null);
+        }}
         onCreate={handleCreateFolder}
+        onUpdate={handleUpdateFolder}
       />
 
       {/* Modal de Confirmação de Exclusão de Pasta */}

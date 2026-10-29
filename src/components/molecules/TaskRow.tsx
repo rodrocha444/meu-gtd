@@ -28,14 +28,24 @@ export const TaskRow: React.FC<TaskRowProps> = ({
 }) => {
   const isDone = task.status === 'completed';
 
+  const isOverdue = useMemo(() => {
+    if (task.status !== 'pending' || !task.dueDate) return false;
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    return task.dueDate < startOfToday.getTime();
+  }, [task.status, task.dueDate]);
+
   const formattedDate = useMemo(() => {
     if (!task.dueDate) return null;
     const d = new Date(task.dueDate);
     const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
     const tomorrow = new Date();
     tomorrow.setDate(today.getDate() + 1);
 
     if (d.toDateString() === today.toDateString()) return 'Hoje';
+    if (d.toDateString() === yesterday.toDateString()) return 'Ontem';
     if (d.toDateString() === tomorrow.toDateString()) return 'Amanhã';
     return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
   }, [task.dueDate]);
@@ -114,6 +124,7 @@ export const TaskRow: React.FC<TaskRowProps> = ({
           formattedDate={formattedDate}
           formattedCompletion={formattedCompletion}
           reminders={task.reminders}
+          isOverdue={isOverdue}
         />
       </div>
 

@@ -38,6 +38,7 @@ interface MobileDrawerProps {
   onCreateProject: () => void;
   getTaskCountForView: (viewId: string) => number;
   onMoveNoteToFolder?: (noteId: string, folderId: string | null) => void;
+  onMoveFolderToFolder?: (folderId: string, targetParentId: string | null) => void;
 }
 
 export const MobileDrawer: React.FC<MobileDrawerProps> = ({
@@ -62,6 +63,7 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({
   onCreateProject,
   getTaskCountForView,
   onMoveNoteToFolder,
+  onMoveFolderToFolder,
 }) => {
   const customProjects = lists.filter((l) => !l.isGtdSystem);
 
@@ -365,6 +367,14 @@ export const MobileDrawer: React.FC<MobileDrawerProps> = ({
                       onMoveNoteToFolder
                         ? (noteId) => {
                             onMoveNoteToFolder(noteId, folder.id);
+                            onClose();
+                          }
+                        : undefined
+                    }
+                    onDropFolder={
+                      onMoveFolderToFolder
+                        ? (folderId) => {
+                            onMoveFolderToFolder(folderId, folder.id);
                             onClose();
                           }
                         : undefined

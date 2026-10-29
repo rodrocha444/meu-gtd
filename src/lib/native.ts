@@ -227,6 +227,9 @@ export const NativeBridge = {
         `calc(100% - ${info.keyboardHeight}px)`
       );
       document.documentElement.style.setProperty('--app-translate-y', '0px');
+      if (window.scrollY !== 0 || window.scrollX !== 0) {
+        window.scrollTo(0, 0);
+      }
     });
 
     const hideSub = await Keyboard.addListener('keyboardWillHide', () => {
@@ -234,6 +237,9 @@ export const NativeBridge = {
       document.documentElement.style.setProperty('--keyboard-height', '0px');
       document.documentElement.style.setProperty('--app-height', '100%');
       document.documentElement.style.setProperty('--app-translate-y', '0px');
+      if (window.scrollY !== 0 || window.scrollX !== 0) {
+        window.scrollTo(0, 0);
+      }
     });
 
     return () => {

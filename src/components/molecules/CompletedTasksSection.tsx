@@ -10,6 +10,7 @@ export interface CompletedTasksSectionProps {
   allTasks: UITask[];
   listMap: Record<string, UIList>;
   selectedTaskId: string | null;
+  defaultExpanded?: boolean;
   onSelectTask: (task: UITask) => void;
   onToggleStatus: (task: UITask, targetStatus?: TaskStatus) => void;
   onDeleteTask: (task: UITask) => void;
@@ -17,17 +18,19 @@ export interface CompletedTasksSectionProps {
 
 /**
  * Seção retrátil de tarefas concluídas exibida ao final das listas ativas.
+ * Colapsada por padrão para manter o foco nas pendentes.
  */
 export const CompletedTasksSection: React.FC<CompletedTasksSectionProps> = ({
   completedTasks,
   allTasks,
   listMap,
   selectedTaskId,
+  defaultExpanded = false,
   onSelectTask,
   onToggleStatus,
   onDeleteTask,
 }) => {
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
 
   if (completedTasks.length === 0) {
     return null;

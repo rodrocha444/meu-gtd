@@ -67,8 +67,8 @@ export const NoteFormattingToolbar: React.FC<NoteFormattingToolbarProps> = ({
             type="button"
             aria-label={btn.label}
             title={btn.label}
-            onMouseDown={(e) => {
-              // Previne a perda de foco/seleção do editor ao clicar no botão
+            onPointerDown={(e) => {
+              // Previne a perda de foco/seleção do editor ao clicar ou tocar no botão no iOS/mobile
               e.preventDefault();
               void NativeBridge.hapticLightImpact();
               onAction(btn.action);

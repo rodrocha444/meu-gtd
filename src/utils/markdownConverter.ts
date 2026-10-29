@@ -98,17 +98,7 @@ export function markdownToHtml(md: string): string {
       const isChecked = checkMatch[1]?.toLowerCase() === 'x';
       const text = checkMatch[2] ?? '';
       result.push(
-        `<div data-checklist-row="true" data-checked="${isChecked}" class="checklist-row flex items-start gap-2.5 my-1.5 ${
-          isChecked ? 'opacity-60' : ''
-        }"><button type="button" data-checklist-toggle="true" contenteditable="false" class="w-4 h-4 rounded-md border ${
-          isChecked
-            ? 'border-violet-600 bg-violet-600 text-white'
-            : 'border-zinc-600 bg-zinc-900 text-violet-400'
-        } text-xs flex items-center justify-center shrink-0 mt-0.5 cursor-pointer"><span data-checklist-icon="true">${
-          isChecked ? '☑' : '☐'
-        }</span></button><span data-checklist-text="true" class="flex-1 outline-none ${
-          isChecked ? 'line-through text-zinc-500' : ''
-        }">${formatInline(text)}</span></div>`
+        `<div data-checklist-row="true" data-checked="${isChecked}" class="checklist-row"><button type="button" data-checklist-toggle="true" contenteditable="false" aria-label="Alternar tarefa" class="checklist-toggle"><svg class="checklist-icon" viewBox="0 0 14 14" fill="none"><path d="M3 7.5L5.5 10L11 4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button><span data-checklist-text="true" class="checklist-text">${formatInline(text) || '<br>'}</span></div>`
       );
       continue;
     }
@@ -151,12 +141,44 @@ export function htmlToPlainText(html: string): string {
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<[^>]+>/g, ' ')
+    .replace(/[☐☑]/g, '')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * Cria a estrutura HTML padronizada e moderna para um item de checklist
+ */
+export function createChecklistRowHtml(text = '', isChecked = false): string {
+  const safeText = text ? text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '<br>';
+  return `<div data-checklist-row="true" data-checked="${isChecked}" class="checklist-row"><button type="button" data-checklist-toggle="true" contenteditable="false" aria-label="Alternar tarefa" class="checklist-toggle"><svg class="checklist-icon" viewBox="0 0 14 14" fill="none"><path d="M3 7.5L5.5 10L11 4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button><span data-checklist-text="true" class="checklist-text">${safeText}</span></div>`;
+}
+
+/**
+ * Normaliza marcações legadas (ex: spans com símbolos ☐/☑ ou botões antigos)
+ * para a nova estrutura de checklist fluida e nativa
+ */
+export function normalizeChecklistHtml(html: string): string {
+  if (!html) return html;
+
+  // Substitui botões antigos ou spans com glifos unicode por SVG moderno
+  return html
+    .replace(
+      /<span data-checklist-icon="true">\s*[☐☑]?\s*<\/span>/gi,
+      '<svg class="checklist-icon" viewBox="0 0 14 14" fill="none"><path d="M3 7.5L5.5 10L11 4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    )
+    .replace(
+      /data-checklist-toggle="true"\s*contenteditable="false"\s*class="[^"]*"/gi,
+      'data-checklist-toggle="true" contenteditable="false" aria-label="Alternar tarefa" class="checklist-toggle"'
+    )
+    .replace(
+      /class="checklist-row[^"]*"/gi,
+      'class="checklist-row"'
+    );
 }
 
 export function countChecklistInContent(content: string): {
