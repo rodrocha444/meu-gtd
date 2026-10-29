@@ -6,6 +6,7 @@ import {
   CheckSquare,
   Edit3,
   Eye,
+  Image as ImageIcon,
   List,
   ListOrdered,
   Maximize2,
@@ -25,6 +26,15 @@ import {
   CustomSelect,
   type CustomSelectOption,
 } from '../ui/CustomControls';
+import {
+  compressAndConvertToBase64,
+  pickImageFile,
+  extractImageFromClipboard,
+  extractImagesFromMarkdown,
+  combineMarkdownWithImages,
+  type TaskImageAttachment,
+} from '../../utils/imageUpload';
+import { TaskImageGallery } from '../molecules/TaskImageGallery';
 import type { UIList, UITask, TaskReminder } from '../../types/task';
 
 interface TaskDetailSheetProps {
@@ -67,6 +77,9 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
   // Rascunho local de edição da tarefa
   const [draftTitle, setDraftTitle] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
+  const [cleanDescription, setCleanDescription] = useState('');
+  const [attachedImages, setAttachedImages] = useState<TaskImageAttachment[]>([]);
+  const attachedImagesRef = useRef<TaskImageAttachment[]>([]);
   const [draftListId, setDraftListId] = useState('inbox');
   const [draftDueDate, setDraftDueDate] = useState<number | null>(null);
   const [draftRecurrenceRule, setDraftRecurrenceRule] = useState<string | null>(null);
@@ -83,13 +96,20 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
   const expandedTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const titleTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
+  const adjustTitleHeight = () => {
+    const el = titleTextareaRef.current;
+    if (el) {
+      el.style.height = 'auto';
+      el.style.height = `${Math.max(el.scrollHeight, 40)}px`;
+    }
+  };
+
   // Auto-dimensionamento da altura do título em múltiplas linhas
   useEffect(() => {
-    if (titleTextareaRef.current) {
-      titleTextareaRef.current.style.height = 'auto';
-      titleTextareaRef.current.style.height = `${titleTextareaRef.current.scrollHeight}px`;
-    }
-  }, [draftTitle]);
+    adjustTitleHeight();
+    const frame = requestAnimationFrame(adjustTitleHeight);
+    return () => cancelAnimationFrame(frame);
+  }, [draftTitle, selectedTask?.id]);
 
   // Status de auto-save offline-first
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -233,6 +253,12 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
     if (selectedTask) {
       setDraftTitle(selectedTask.title);
       draftTitleRef.current = selectedTask.title;
+      const { cleanText, images } = extractImagesFromMarkdown(
+        selectedTask.description || ''
+      );
+      setCleanDescription(cleanText);
+      setAttachedImages(images);
+      attachedImagesRef.current = images;
       setDraftDescription(selectedTask.description);
       draftDescriptionRef.current = selectedTask.description;
       setDraftListId(selectedTask.listId);
@@ -328,9 +354,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
       const replacement = formattedLines.join('\n');
       const newValue =
         value.slice(0, selectionStart) + replacement + value.slice(selectionEnd);
-      setDraftDescription(newValue);
-      draftDescriptionRef.current = newValue;
-      saveImmediate({ description: newValue });
+      syncDescriptionAndImages(newValue, attachedImagesRef.current, true);
       setTimeout(() => {
         textarea.focus();
         textarea.selectionStart = selectionStart;
@@ -345,9 +369,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
       if (currentLine.trim() === '') {
         const newValue =
           value.slice(0, lineStart) + prefix + value.slice(selectionStart);
-        setDraftDescription(newValue);
-        draftDescriptionRef.current = newValue;
-        saveImmediate({ description: newValue });
+        syncDescriptionAndImages(newValue, attachedImagesRef.current, true);
         setTimeout(() => {
           textarea.focus();
           textarea.selectionStart = textarea.selectionEnd =
@@ -359,9 +381,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
           value.slice(0, selectionStart) +
           insertStr +
           value.slice(selectionEnd);
-        setDraftDescription(newValue);
-        draftDescriptionRef.current = newValue;
-        saveImmediate({ description: newValue });
+        syncDescriptionAndImages(newValue, attachedImagesRef.current, true);
         setTimeout(() => {
           textarea.focus();
           textarea.selectionStart = textarea.selectionEnd =
@@ -397,9 +417,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
           if (!content.trim()) {
             const newValue =
               value.slice(0, lineStart) + value.slice(selectionStart);
-            setDraftDescription(newValue);
-            draftDescriptionRef.current = newValue;
-            scheduleDebouncedSave();
+            syncDescriptionAndImages(newValue, attachedImagesRef.current, false);
             setTimeout(() => {
               textarea.selectionStart = textarea.selectionEnd = lineStart;
             }, 0);
@@ -413,9 +431,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             value.slice(0, selectionStart) +
             newPrefix +
             value.slice(selectionStart);
-          setDraftDescription(newValue);
-          draftDescriptionRef.current = newValue;
-          scheduleDebouncedSave();
+          syncDescriptionAndImages(newValue, attachedImagesRef.current, false);
           setTimeout(() => {
             textarea.selectionStart = textarea.selectionEnd =
               selectionStart + newPrefix.length;
@@ -433,9 +449,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
           if (!content.trim()) {
             const newValue =
               value.slice(0, lineStart) + value.slice(selectionStart);
-            setDraftDescription(newValue);
-            draftDescriptionRef.current = newValue;
-            scheduleDebouncedSave();
+            syncDescriptionAndImages(newValue, attachedImagesRef.current, false);
             setTimeout(() => {
               textarea.selectionStart = textarea.selectionEnd = lineStart;
             }, 0);
@@ -450,9 +464,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             value.slice(0, selectionStart) +
             newPrefix +
             value.slice(selectionStart);
-          setDraftDescription(newValue);
-          draftDescriptionRef.current = newValue;
-          scheduleDebouncedSave();
+          syncDescriptionAndImages(newValue, attachedImagesRef.current, false);
           setTimeout(() => {
             textarea.selectionStart = textarea.selectionEnd =
               selectionStart + newPrefix.length;
@@ -471,9 +483,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
           if (!content.trim()) {
             const newValue =
               value.slice(0, lineStart) + value.slice(selectionStart);
-            setDraftDescription(newValue);
-            draftDescriptionRef.current = newValue;
-            scheduleDebouncedSave();
+            syncDescriptionAndImages(newValue, attachedImagesRef.current, false);
             setTimeout(() => {
               textarea.selectionStart = textarea.selectionEnd = lineStart;
             }, 0);
@@ -485,9 +495,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             value.slice(0, selectionStart) +
             newPrefix +
             value.slice(selectionStart);
-          setDraftDescription(newValue);
-          draftDescriptionRef.current = newValue;
-          scheduleDebouncedSave();
+          syncDescriptionAndImages(newValue, attachedImagesRef.current, false);
           setTimeout(() => {
             textarea.selectionStart = textarea.selectionEnd =
               selectionStart + newPrefix.length;
@@ -505,9 +513,7 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
       const insertText = '  ';
       const newValue =
         value.slice(0, selectionStart) + insertText + value.slice(selectionEnd);
-      setDraftDescription(newValue);
-      draftDescriptionRef.current = newValue;
-      scheduleDebouncedSave();
+      syncDescriptionAndImages(newValue, attachedImagesRef.current, false);
       setTimeout(() => {
         textarea.selectionStart = textarea.selectionEnd =
           selectionStart + insertText.length;
@@ -515,10 +521,80 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
     }
   };
 
+  const syncDescriptionAndImages = (
+    newCleanText: string,
+    newImages: TaskImageAttachment[] = attachedImagesRef.current,
+    immediate = false
+  ) => {
+    setCleanDescription(newCleanText);
+    setAttachedImages(newImages);
+    attachedImagesRef.current = newImages;
+    const combined = combineMarkdownWithImages(newCleanText, newImages);
+    setDraftDescription(combined);
+    draftDescriptionRef.current = combined;
+    if (immediate) {
+      saveImmediate({ description: combined });
+    } else {
+      scheduleDebouncedSave();
+    }
+  };
+
+  const handleRemoveImage = (imageId: string) => {
+    const nextImages = attachedImages.filter((img) => img.id !== imageId);
+    syncDescriptionAndImages(cleanDescription, nextImages, true);
+    if (nextImages.length === 0 && cleanDescription.trim().length === 0) {
+      setIsPreviewMode(false);
+    }
+  };
+
+  const handleInsertImage = async () => {
+    void NativeBridge.hapticLightImpact();
+    const file = await pickImageFile();
+    if (!file) return;
+
+    try {
+      const base64 = await compressAndConvertToBase64(file);
+      const newImage: TaskImageAttachment = {
+        id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        alt: 'imagem',
+        src: base64,
+      };
+      const nextImages = [...attachedImagesRef.current, newImage];
+      syncDescriptionAndImages(cleanDescription, nextImages, true);
+      void NativeBridge.hapticLightImpact();
+    } catch (err) {
+      console.error('Erro ao processar imagem:', err);
+    }
+  };
+
+  const handleDescriptionPaste = (
+    e: React.ClipboardEvent<HTMLTextAreaElement>
+  ) => {
+    const imageFile = extractImageFromClipboard(e);
+    if (imageFile) {
+      e.preventDefault();
+      void (async () => {
+        try {
+          const base64 = await compressAndConvertToBase64(imageFile);
+          const newImage: TaskImageAttachment = {
+            id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            alt: 'screenshot',
+            src: base64,
+          };
+          const nextImages = [...attachedImagesRef.current, newImage];
+          syncDescriptionAndImages(cleanDescription, nextImages, true);
+          void NativeBridge.hapticLightImpact();
+        } catch (err) {
+          console.error('Erro ao colar imagem:', err);
+        }
+      })();
+    }
+  };
+
   // Alternar checkbox interativo no preview Markdown
   const toggleChecklistLine = (lineIdx: number, currentChecked: boolean) => {
     void NativeBridge.hapticLightImpact();
-    const lines = draftDescription.split('\n');
+    const lines = cleanDescription.split('\n');
     if (lines[lineIdx] !== undefined) {
       const targetLine = lines[lineIdx];
       const newChecked = !currentChecked;
@@ -526,10 +602,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
         /^(\s*[-*]\s*\[)[ xX](\]\s*)/,
         `$1${newChecked ? 'x' : ' '}$2`
       );
-      const newDesc = lines.join('\n');
-      setDraftDescription(newDesc);
-      draftDescriptionRef.current = newDesc;
-      saveImmediate({ description: newDesc });
+      const newCleanText = lines.join('\n');
+      syncDescriptionAndImages(newCleanText, attachedImagesRef.current, true);
     }
   };
 
@@ -603,6 +677,26 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
                   {orderedMatch[2] ?? '1'}.
                 </span>
                 <span>{orderedMatch[3] ?? ''}</span>
+              </div>
+            );
+          }
+
+          // Imagem Markdown: `![alt](src)`
+          const imgMatch = line.trim().match(/^!\[(.*?)\]\((.*?)\)$/);
+          if (imgMatch) {
+            const alt = imgMatch[1];
+            const src = imgMatch[2];
+            return (
+              <div key={idx} className="my-2 text-center">
+                <img
+                  src={src}
+                  alt={alt}
+                  loading="lazy"
+                  className="rounded-xl max-w-full max-h-80 mx-auto object-contain border border-zinc-800 shadow-md bg-zinc-950/60"
+                />
+                {alt && alt !== 'imagem' && alt !== 'screenshot' && (
+                  <p className="text-[10px] text-zinc-500 mt-0.5 italic">{alt}</p>
+                )}
               </div>
             );
           }
@@ -699,9 +793,20 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
             {/* Título Editável + Notas */}
             <div>
               <textarea
-                ref={titleTextareaRef}
+                ref={(el) => {
+                  titleTextareaRef.current = el;
+                  if (el) {
+                    el.style.height = 'auto';
+                    el.style.height = `${Math.max(el.scrollHeight, 40)}px`;
+                  }
+                }}
                 rows={1}
                 value={draftTitle}
+                onInput={(e) => {
+                  const target = e.currentTarget;
+                  target.style.height = 'auto';
+                  target.style.height = `${Math.max(target.scrollHeight, 40)}px`;
+                }}
                 onChange={(e) => {
                   setDraftTitle(e.target.value);
                   draftTitleRef.current = e.target.value;
@@ -716,7 +821,8 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
                   }
                 }}
                 placeholder="Título da tarefa..."
-                className="w-full bg-transparent text-base font-semibold text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 rounded-lg px-1.5 py-1 -mx-1.5 resize-none break-words whitespace-pre-wrap overflow-hidden leading-snug"
+                style={{ fieldSizing: 'content' } as React.CSSProperties}
+                className="w-full bg-transparent text-lg md:text-xl font-bold text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 rounded-lg px-2 py-1.5 -mx-2 resize-none break-words whitespace-pre-wrap overflow-y-auto max-h-[35vh] min-h-[40px] leading-snug"
               />
               <div className="mt-2.5">
                 <div className="flex items-center justify-between mb-1.5">
@@ -791,34 +897,56 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
                       <ListOrdered className="w-3 h-3 text-amber-400" />
                       <span>Numerada</span>
                     </button>
+
+                    <button
+                      type="button"
+                      onClick={() => void handleInsertImage()}
+                      className="px-2 py-1 rounded-md text-[11px] font-medium bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-700/50 flex items-center gap-1.5 transition-colors"
+                      title="Inserir Imagem (WebP comprimido)"
+                    >
+                      <ImageIcon className="w-3 h-3 text-sky-400" />
+                      <span>Imagem</span>
+                    </button>
                   </div>
                 )}
 
                 {/* Área de Texto ou Pré-visualização com Listas */}
                 {isPreviewMode ? (
-                  <div
-                    onDoubleClick={() => setIsPreviewMode(false)}
-                    title="Duplo clique para editar"
-                    className="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl p-3 text-xs text-zinc-200 overflow-y-auto cursor-pointer min-h-[100px] max-h-[220px]"
-                  >
-                    {renderMarkdownPreview(draftDescription, toggleChecklistLine)}
-                  </div>
+                  (cleanDescription.trim().length > 0 || attachedImages.length === 0) && (
+                    <div
+                      onDoubleClick={() => setIsPreviewMode(false)}
+                      title="Duplo clique para editar"
+                      className="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl p-3 text-xs text-zinc-200 overflow-y-auto cursor-pointer min-h-[60px] max-h-[220px]"
+                    >
+                      {renderMarkdownPreview(cleanDescription, toggleChecklistLine)}
+                    </div>
+                  )
                 ) : (
                   <textarea
                     ref={textareaRef}
                     rows={4}
-                    value={draftDescription}
+                    value={cleanDescription}
                     onChange={(e) => {
-                      setDraftDescription(e.target.value);
-                      draftDescriptionRef.current = e.target.value;
-                      scheduleDebouncedSave();
+                      const { cleanText, images } = extractImagesFromMarkdown(e.target.value);
+                      if (images.length > 0) {
+                        syncDescriptionAndImages(cleanText, [...attachedImages, ...images], false);
+                      } else {
+                        syncDescriptionAndImages(e.target.value, attachedImages, false);
+                      }
                     }}
                     onBlur={() => void flushSave()}
                     onKeyDown={handleDescriptionKeyDown}
+                    onPaste={handleDescriptionPaste}
                     placeholder="Notas em Markdown, listas (- item, 1. item) ou checklist (- [ ] item)..."
                     className="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl p-2.5 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 font-mono leading-relaxed transition-all resize-y"
                   />
                 )}
+
+                {/* Galeria de Imagens & Anexos (estável e única) */}
+                <TaskImageGallery
+                  images={attachedImages}
+                  onRemoveImage={handleRemoveImage}
+                />
               </div>
             </div>
 
@@ -1021,39 +1149,61 @@ export const TaskDetailSheet: React.FC<TaskDetailSheetProps> = ({
                   <ListOrdered className="w-3.5 h-3.5 text-amber-400" />
                   <span>Numerada</span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => void handleInsertImage()}
+                  className="px-2.5 py-1 rounded-lg text-xs font-medium bg-zinc-800/70 hover:bg-zinc-700/80 text-zinc-300 border border-zinc-700/50 flex items-center gap-1.5 transition-colors"
+                  title="Inserir Imagem (WebP comprimido)"
+                >
+                  <ImageIcon className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Imagem</span>
+                </button>
               </div>
 
               <span className="text-[11px] text-zinc-500 font-medium hidden sm:inline">
-                {draftDescription.split('\n').filter(Boolean).length} linhas
+                {cleanDescription.split('\n').filter(Boolean).length} linhas
               </span>
             </div>
           )}
 
           {/* Corpo do Editor Expandido: Edição vs Pré-visualização */}
-          <div className="flex-1 p-5 overflow-y-auto native-scroll-container bg-zinc-950/20">
+          <div className="flex-1 p-5 overflow-y-auto native-scroll-container bg-zinc-950/20 flex flex-col">
             {isPreviewMode ? (
-              <div
-                onDoubleClick={() => setIsPreviewMode(false)}
-                title="Duplo clique para editar"
-                className="max-w-none text-zinc-200 cursor-pointer"
-              >
-                {renderMarkdownPreview(draftDescription, toggleChecklistLine)}
-              </div>
+              (cleanDescription.trim().length > 0 || attachedImages.length === 0) && (
+                <div
+                  onDoubleClick={() => setIsPreviewMode(false)}
+                  title="Duplo clique para editar"
+                  className="max-w-none text-zinc-200 cursor-pointer flex-1"
+                >
+                  {renderMarkdownPreview(cleanDescription, toggleChecklistLine)}
+                </div>
+              )
             ) : (
               <textarea
                 ref={expandedTextareaRef}
-                value={draftDescription}
+                value={cleanDescription}
                 onChange={(e) => {
-                  setDraftDescription(e.target.value);
-                  draftDescriptionRef.current = e.target.value;
-                  scheduleDebouncedSave();
+                  const { cleanText, images } = extractImagesFromMarkdown(e.target.value);
+                  if (images.length > 0) {
+                    syncDescriptionAndImages(cleanText, [...attachedImages, ...images], false);
+                  } else {
+                    syncDescriptionAndImages(e.target.value, attachedImages, false);
+                  }
                 }}
                 onBlur={() => void flushSave()}
                 onKeyDown={handleDescriptionKeyDown}
+                onPaste={handleDescriptionPaste}
                 placeholder="Digite notas em Markdown, tarefas com checklist (- [ ]), links e listas..."
-                className="w-full h-full min-h-[300px] bg-transparent text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none resize-none font-mono leading-relaxed"
+                className="w-full flex-1 min-h-[220px] bg-transparent text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none resize-none font-mono leading-relaxed"
               />
             )}
+
+            {/* Galeria de Imagens e Anexos (estável e fora do duplo clique) */}
+            <TaskImageGallery
+              images={attachedImages}
+              onRemoveImage={handleRemoveImage}
+            />
           </div>
 
           {/* Rodapé do Editor Expandido */}

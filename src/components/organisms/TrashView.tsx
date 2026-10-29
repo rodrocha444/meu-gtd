@@ -13,6 +13,7 @@ import { CustomSegmentedControl } from '../ui/CustomControls';
 import { EmptyState } from '../atoms/EmptyState';
 import { getTrashRemainingDays, formatDeletedDate } from '../../utils/trash';
 import { htmlToPlainText } from '../../utils/markdownConverter';
+import { extractImagesFromMarkdown } from '../../utils/imageUpload';
 import { PRIORITY_META } from '../../constants/priority';
 import type { UITask, UIList } from '../../types/task';
 import type { UINote, UINoteFolder } from '../../types/note';
@@ -244,7 +245,7 @@ export const TrashView: React.FC<TrashViewProps> = ({
 
                         {task.description && (
                           <p className="text-xs text-zinc-500 line-clamp-1">
-                            {task.description}
+                            {extractImagesFromMarkdown(task.description).cleanText || 'Anexo de imagem'}
                           </p>
                         )}
 

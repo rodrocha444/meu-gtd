@@ -6,7 +6,7 @@ export function markdownToHtml(md: string): string {
   if (!md) return '<p><br></p>';
 
   // Se já contiver tags estruturais HTML, retorna como está
-  if (/<(h[1-6]|p|div|ul|ol|blockquote|pre|table|br)[\s>]/i.test(md)) {
+  if (/<(h[1-6]|p|div|ul|ol|blockquote|pre|table|br|img)[\s>]/i.test(md)) {
     return md;
   }
 
@@ -64,6 +64,18 @@ export function markdownToHtml(md: string): string {
     if (trimmed === '---' || trimmed === '***') {
       closeList();
       result.push('<hr>');
+      continue;
+    }
+
+    // Imagens: ![alt](src)
+    const imgMatch = trimmed.match(/^!\[(.*?)\]\((.*?)\)$/);
+    if (imgMatch) {
+      closeList();
+      const alt = imgMatch[1] ?? '';
+      const src = imgMatch[2] ?? '';
+      result.push(
+        `<div class="my-2.5 text-center"><img src="${src}" alt="${alt}" class="rounded-xl max-w-full max-h-96 mx-auto object-contain border border-zinc-800 shadow-md" loading="lazy" /></div>`
+      );
       continue;
     }
 

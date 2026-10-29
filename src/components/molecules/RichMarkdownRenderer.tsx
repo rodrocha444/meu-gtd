@@ -122,6 +122,27 @@ export const RichMarkdownRenderer: React.FC<RichMarkdownRendererProps> = ({
       continue;
     }
 
+    // Imagens Markdown: ![alt](src)
+    const imgMatch = trimmed.match(/^!\[(.*?)\]\((.*?)\)$/);
+    if (imgMatch) {
+      const alt = imgMatch[1];
+      const src = imgMatch[2];
+      elements.push(
+        <div key={`img-${i}`} className="my-3 text-center">
+          <img
+            src={src}
+            alt={alt}
+            loading="lazy"
+            className="rounded-xl max-w-full max-h-96 mx-auto object-contain border border-zinc-800 shadow-md bg-zinc-950/60"
+          />
+          {alt && (
+            <p className="text-[11px] text-zinc-500 mt-1 italic">{alt}</p>
+          )}
+        </div>
+      );
+      continue;
+    }
+
     // Títulos H1, H2, H3
     if (trimmed.startsWith('# ')) {
       elements.push(

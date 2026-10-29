@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import {
   CheckSquare,
+  ChevronRight,
   FileText,
   Folder,
   FolderKanban,
@@ -39,6 +40,8 @@ interface SidebarProps {
   pendingCount?: number;
   onSync: () => void;
   onCreateProject: () => void;
+  isProjectsCollapsed?: boolean;
+  onToggleProjectsCollapsed?: () => void;
   getTaskCountForView: (viewId: string) => number;
   onMoveNoteToFolder?: (noteId: string, folderId: string | null) => void;
   onMoveFolderToFolder?: (folderId: string, targetParentId: string | null) => void;
@@ -64,6 +67,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   pendingCount,
   onSync,
   onCreateProject,
+  isProjectsCollapsed = false,
+  onToggleProjectsCollapsed,
   getTaskCountForView,
   onMoveNoteToFolder,
   onMoveFolderToFolder,
@@ -243,26 +248,44 @@ export const Sidebar: React.FC<SidebarProps> = ({
             {/* Seção de Projetos GTD */}
             {sidebarOpen ? (
               <div className="pt-2 pb-1 px-3 flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => {
-                    void NativeBridge.hapticLightImpact();
-                    onSelectView('projects');
-                  }}
-                  className={`flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider transition-colors ${
-                    activeView === 'projects'
-                      ? 'text-pink-400 font-bold'
-                      : 'text-zinc-500 hover:text-zinc-300'
-                  }`}
-                  title="Abrir visão geral de projetos"
-                >
-                  <span>Projetos GTD</span>
-                  {customProjects.length > 0 && (
-                    <span className="text-[10px] font-normal text-zinc-600">
-                      ({customProjects.length})
-                    </span>
-                  )}
-                </button>
+                <div className="flex items-center gap-1 min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void NativeBridge.hapticLightImpact();
+                      onToggleProjectsCollapsed?.();
+                    }}
+                    className="p-1 -ml-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
+                    title={isProjectsCollapsed ? 'Expandir Projetos' : 'Recolher Projetos'}
+                    aria-label={isProjectsCollapsed ? 'Expandir Projetos' : 'Recolher Projetos'}
+                  >
+                    <ChevronRight
+                      className={`w-3.5 h-3.5 transition-transform duration-200 ${
+                        !isProjectsCollapsed ? 'rotate-90 text-zinc-300' : 'text-zinc-500'
+                      }`}
+                    />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void NativeBridge.hapticLightImpact();
+                      onSelectView('projects');
+                    }}
+                    className={`flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider transition-colors truncate ${
+                      activeView === 'projects'
+                        ? 'text-pink-400 font-bold'
+                        : 'text-zinc-500 hover:text-zinc-300'
+                    }`}
+                    title="Abrir visão geral de projetos"
+                  >
+                    <span>Projetos GTD</span>
+                    {customProjects.length > 0 && (
+                      <span className="text-[10px] font-normal text-zinc-600">
+                        ({customProjects.length})
+                      </span>
+                    )}
+                  </button>
+                </div>
                 <button
                   type="button"
                   aria-label="Criar Novo Projeto GTD"
@@ -295,45 +318,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </button>
             )}
 
-            {customProjects.map((project) => {
-              const count = getTaskCountForView(project.id);
+            {!isProjectsCollapsed && (
+              <>
+                {customProjects.map((project) => {
+                  const count = getTaskCountForView(project.id);
 
-              return (
-                <button
-                  key={project.id}
-                  type="button"
-                  onClick={() => {
-                    void NativeBridge.hapticLightImpact();
-                    onSelectView(project.id);
-                  }}
-                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-                    activeView === project.id
-                      ? 'bg-zinc-800 text-zinc-100'
-                      : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
-                  }`}
-                >
-                  <FolderKanban
-                    className="w-4 h-4 shrink-0"
-                    style={{ color: project.color }}
-                  />
-                  {sidebarOpen && (
-                    <>
-                      <span className="truncate flex-1 text-left">{project.name}</span>
-                      {count > 0 && (
-                        <span className="text-[11px] text-zinc-400 font-semibold px-2 py-0.5 rounded-full bg-zinc-800/80">
-                          {count}
-                        </span>
+                  return (
+                    <button
+                      key={project.id}
+                      type="button"
+                      onClick={() => {
+                        void NativeBridge.hapticLightImpact();
+                        onSelectView(project.id);
+                      }}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
+                        activeView === project.id
+                          ? 'bg-zinc-800 text-zinc-100'
+                          : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+                      }`}
+                    >
+                      <FolderKanban
+                        className="w-4 h-4 shrink-0"
+                        style={{ color: project.color }}
+                      />
+                      {sidebarOpen && (
+                        <>
+                          <span className="truncate flex-1 text-left">{project.name}</span>
+                          {count > 0 && (
+                            <span className="text-[11px] text-zinc-400 font-semibold px-2 py-0.5 rounded-full bg-zinc-800/80">
+                              {count}
+                            </span>
+                          )}
+                        </>
                       )}
-                    </>
-                  )}
-                </button>
-              );
-            })}
+                    </button>
+                  );
+                })}
 
-            {sidebarOpen && customProjects.length === 0 && (
-              <p className="px-3 py-2 text-[11px] text-zinc-500 italic">
-                Nenhum projeto criado
-              </p>
+                {sidebarOpen && customProjects.length === 0 && (
+                  <p className="px-3 py-2 text-[11px] text-zinc-500 italic">
+                    Nenhum projeto criado
+                  </p>
+                )}
+              </>
             )}
           </>
         ) : (

@@ -209,6 +209,7 @@ export const TaskManagerApp: React.FC = () => {
   const [notes, setNotes] = useState<UINote[]>(() => loadCachedNotes());
   const [activeFolderId, setActiveFolderId] = useState<string>('all');
   const [selectedNote, setSelectedNote] = useState<UINote | null>(null);
+  const [noteEditorMode, setNoteEditorMode] = useState<'edit' | 'preview'>('preview');
   const [isNewFolderModalOpen, setIsNewFolderModalOpen] = useState<boolean>(false);
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
   const [folderToEdit, setFolderToEdit] = useState<UINoteFolder | null>(null);
@@ -222,6 +223,13 @@ export const TaskManagerApp: React.FC = () => {
   notesRef.current = notes;
 
   // Controle de Projetos GTD e Agrupamento
+  const [isProjectsCollapsed, setIsProjectsCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('meu_gtd_projects_collapsed') === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [isNewProjectModalOpen, setIsNewProjectModalOpen] = useState<boolean>(false);
   const [projectToDelete, setProjectToDelete] = useState<UIList | null>(null);
   const [taskToDelete, setTaskToDelete] = useState<UITask | null>(null);
@@ -229,6 +237,18 @@ export const TaskManagerApp: React.FC = () => {
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState<boolean>(false);
   const [isClearCompletedModalOpen, setIsClearCompletedModalOpen] = useState<boolean>(false);
   const [isEmptyTrashModalOpen, setIsEmptyTrashModalOpen] = useState<boolean>(false);
+
+  const handleToggleProjectsCollapsed = () => {
+    setIsProjectsCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('meu_gtd_projects_collapsed', String(next));
+      } catch {
+        // Ignora erros de storage restrito
+      }
+      return next;
+    });
+  };
 
   // Helper para contagem de notas por pasta
   const getNoteCountForFolder = (folderId: string): number => {
@@ -694,6 +714,7 @@ export const TaskManagerApp: React.FC = () => {
       createdAt: now,
     });
     setPendingCount(getPendingCount());
+    setNoteEditorMode('edit');
     setSelectedNote(newNote);
     void triggerSync();
   };
@@ -1652,6 +1673,8 @@ export const TaskManagerApp: React.FC = () => {
         pendingCount={pendingCount}
         onSync={() => void handleManualSync()}
         onCreateProject={() => setIsNewProjectModalOpen(true)}
+        isProjectsCollapsed={isProjectsCollapsed}
+        onToggleProjectsCollapsed={handleToggleProjectsCollapsed}
         getTaskCountForView={getTaskCountForView}
       />
 
@@ -1683,6 +1706,8 @@ export const TaskManagerApp: React.FC = () => {
         pendingCount={pendingCount}
         onSync={() => void handleManualSync()}
         onCreateProject={() => setIsNewProjectModalOpen(true)}
+        isProjectsCollapsed={isProjectsCollapsed}
+        onToggleProjectsCollapsed={handleToggleProjectsCollapsed}
         getTaskCountForView={getTaskCountForView}
       />
 
@@ -1776,7 +1801,10 @@ export const TaskManagerApp: React.FC = () => {
               folders={noteFolders}
               activeFolderId={activeFolderId}
               onSelectFolder={setActiveFolderId}
-              onSelectNote={(n) => setSelectedNote(n)}
+              onSelectNote={(n) => {
+                setNoteEditorMode('preview');
+                setSelectedNote(n);
+              }}
               onCreateNote={handleCreateNote}
               onTogglePin={handleTogglePinNote}
               onDeleteNote={(n) => setNoteToDelete(n)}
@@ -1862,6 +1890,7 @@ export const TaskManagerApp: React.FC = () => {
       <NoteEditorSheet
         note={selectedNote}
         isOpen={Boolean(selectedNote)}
+        initialMode={noteEditorMode}
         folders={noteFolders}
         onClose={() => setSelectedNote(null)}
         onUpdateNote={handleUpdateNote}

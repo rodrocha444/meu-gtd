@@ -13,18 +13,27 @@ import {
   NoteFormattingToolbar,
   type FormatAction,
 } from '../molecules/NoteFormattingToolbar';
+import { ImageResizeOverlay } from '../molecules/ImageResizeOverlay';
+import { NotePreviewImageButtons } from '../molecules/NotePreviewImageButtons';
+import { ImageViewerModal } from '../molecules/ImageViewerModal';
 import {
   markdownToHtml,
   htmlToPlainText,
   createChecklistRowHtml,
   normalizeChecklistHtml,
 } from '../../utils/markdownConverter';
+import {
+  compressAndConvertToBase64,
+  pickImageFile,
+  extractImageFromClipboard,
+} from '../../utils/imageUpload';
 import type { UINote, UINoteFolder } from '../../types/note';
 
 interface NoteEditorSheetProps {
   note: UINote | null;
   isOpen: boolean;
   folders: UINoteFolder[];
+  initialMode?: 'edit' | 'preview';
   onClose: () => void;
   onUpdateNote: (
     noteId: string,
@@ -37,23 +46,116 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
   note,
   isOpen,
   folders,
+  initialMode,
   onClose,
   onUpdateNote,
   onDeleteNote,
 }) => {
   const [title, setTitle] = useState('');
   const [isPinned, setIsPinned] = useState(false);
-  const [previewMode, setPreviewMode] = useState<'edit' | 'preview'>('edit');
+  const [previewMode, setPreviewMode] = useState<'edit' | 'preview'>(() => {
+    if (initialMode) return initialMode;
+    return note && (note.title.trim() || note.content.trim()) ? 'preview' : 'edit';
+  });
   const [rawHtml, setRawHtml] = useState('');
+  const [selectedImg, setSelectedImg] = useState<HTMLImageElement | null>(null);
+  const [fullscreenImage, setFullscreenImage] = useState<{ src: string; alt?: string } | null>(null);
 
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const isInternalTypingRef = useRef(false);
+  const lastEditorSelectionRef = useRef<Range | null>(null);
+
+  const saveEditorSelection = () => {
+    const sel = window.getSelection();
+    if (
+      sel &&
+      sel.rangeCount > 0 &&
+      editorRef.current &&
+      editorRef.current.contains(sel.getRangeAt(0).commonAncestorContainer)
+    ) {
+      lastEditorSelectionRef.current = sel.getRangeAt(0).cloneRange();
+    }
+  };
+
+  const insertImageIntoEditor = (base64: string, targetRange?: Range | null) => {
+    if (!editorRef.current) return;
+    editorRef.current.focus();
+
+    const img = document.createElement('img');
+    img.src = base64;
+    img.alt = 'Imagem da anotação';
+    img.loading = 'lazy';
+
+    // Container de parágrafo seguinte para permitir continuar digitando abaixo da imagem facilmente
+    const followUpP = document.createElement('p');
+    followUpP.innerHTML = '<br>';
+
+    const sel = window.getSelection();
+    let range = targetRange;
+
+    // Se o targetRange não for válido ou estiver fora do editor, verifica a seleção atual
+    if (
+      !range ||
+      !editorRef.current.contains(range.commonAncestorContainer)
+    ) {
+      if (
+        sel &&
+        sel.rangeCount > 0 &&
+        editorRef.current.contains(sel.getRangeAt(0).commonAncestorContainer)
+      ) {
+        range = sel.getRangeAt(0);
+      } else {
+        range = null;
+      }
+    }
+
+    if (range) {
+      range.deleteContents();
+      range.insertNode(img);
+      img.after(followUpP);
+
+      const newRange = document.createRange();
+      newRange.setStart(followUpP, 0);
+      newRange.collapse(true);
+      sel?.removeAllRanges();
+      sel?.addRange(newRange);
+      lastEditorSelectionRef.current = newRange;
+    } else {
+      editorRef.current.appendChild(img);
+      editorRef.current.appendChild(followUpP);
+
+      const newRange = document.createRange();
+      newRange.setStart(followUpP, 0);
+      newRange.collapse(true);
+      sel?.removeAllRanges();
+      sel?.addRange(newRange);
+      lastEditorSelectionRef.current = newRange;
+    }
+
+    handleContentSync();
+    setSelectedImg(img);
+    void NativeBridge.hapticLightImpact();
+  };
+
+  const handleImageSelect = async (file: File) => {
+    try {
+      const base64 = await compressAndConvertToBase64(file);
+      insertImageIntoEditor(base64, lastEditorSelectionRef.current);
+    } catch (err) {
+      console.error('Erro ao processar imagem:', err);
+    }
+  };
 
   useEffect(() => {
+    setSelectedImg(null);
     if (note) {
       setTitle(note.title);
       setIsPinned(note.isPinned);
-      setPreviewMode('edit');
+
+      const resolvedMode =
+        initialMode ?? (note.title.trim() || note.content.trim() ? 'preview' : 'edit');
+      setPreviewMode(resolvedMode);
 
       const initialHtml = normalizeChecklistHtml(markdownToHtml(note.content));
       setRawHtml(initialHtml);
@@ -62,7 +164,7 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
         editorRef.current.innerHTML = initialHtml;
       }
     }
-  }, [note?.id]);
+  }, [note?.id, initialMode]);
 
   if (!isOpen || !note) return null;
 
@@ -97,6 +199,12 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
   const handleFormatAction = (action: FormatAction) => {
     if (!editorRef.current) return;
     editorRef.current.focus();
+
+    if (lastEditorSelectionRef.current) {
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(lastEditorSelectionRef.current);
+    }
 
     switch (action) {
       case 'bold':
@@ -183,9 +291,37 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
         }
         break;
       }
+      case 'image': {
+        void (async () => {
+          const file = await pickImageFile();
+          if (!file) return;
+          try {
+            const base64 = await compressAndConvertToBase64(file);
+            insertImageIntoEditor(base64, lastEditorSelectionRef.current);
+          } catch (err) {
+            console.error('Erro ao processar imagem:', err);
+          }
+        })();
+        break;
+      }
     }
 
     handleContentSync();
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const imageFile = extractImageFromClipboard(e);
+    if (imageFile) {
+      e.preventDefault();
+      void (async () => {
+        try {
+          const base64 = await compressAndConvertToBase64(imageFile);
+          insertImageIntoEditor(base64, lastEditorSelectionRef.current);
+        } catch (err) {
+          console.error('Erro ao colar imagem:', err);
+        }
+      })();
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -341,6 +477,26 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
 
   const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
+
+    if (target.tagName.toLowerCase() === 'img') {
+      e.stopPropagation();
+      void NativeBridge.hapticLightImpact();
+      if (previewMode === 'edit') {
+        setSelectedImg(target as HTMLImageElement);
+      } else {
+        const imgEl = target as HTMLImageElement;
+        setFullscreenImage({
+          src: imgEl.src,
+          alt: imgEl.alt || 'Imagem da anotação',
+        });
+      }
+      return;
+    }
+
+    if (selectedImg) {
+      setSelectedImg(null);
+    }
+
     const toggleBtn = target.closest('[data-checklist-toggle]');
     if (toggleBtn) {
       e.preventDefault();
@@ -363,7 +519,7 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
 
         handleContentSync();
       }
-    } else if (e.target === e.currentTarget && editorRef.current) {
+    } else if (previewMode === 'edit' && e.target === e.currentTarget && editorRef.current) {
       editorRef.current.focus();
     }
   };
@@ -434,7 +590,7 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
                 }`}
               >
                 <BookOpen className="w-3 h-3" />
-                <span>Leitura</span>
+                <span>Visualização</span>
               </button>
             </div>
           </div>
@@ -483,33 +639,89 @@ export const NoteEditorSheet: React.FC<NoteEditorSheetProps> = ({
             type="text"
             value={title}
             onChange={(e) => handleTitleChange(e.target.value)}
-            placeholder="Título da anotação..."
-            className="w-full bg-transparent text-lg md:text-xl font-bold text-zinc-100 placeholder-zinc-600 focus:outline-none tracking-tight"
+            readOnly={previewMode === 'preview'}
+            placeholder={previewMode === 'preview' ? 'Sem título' : 'Título da anotação...'}
+            className={`w-full bg-transparent text-lg md:text-xl font-bold text-zinc-100 placeholder-zinc-600 focus:outline-none tracking-tight ${
+              previewMode === 'preview' ? 'cursor-default select-text' : ''
+            }`}
           />
         </div>
 
         {/* Barra de Formatação WYSIWYG (Exibida no modo Editor) */}
         {previewMode === 'edit' && (
-          <NoteFormattingToolbar onAction={handleFormatAction} />
+          <NoteFormattingToolbar
+            onAction={handleFormatAction}
+            onImageSelect={handleImageSelect}
+          />
         )}
 
         {/* Editor WYSIWYG / Leitura Direta (sem código cru) */}
         <div
-          className="flex-1 min-h-0 px-5 py-3 overflow-y-auto native-scroll-container"
+          ref={scrollContainerRef}
+          className="relative flex-1 min-h-0 px-5 py-3 overflow-y-auto native-scroll-container"
           onClick={handleEditorClick}
         >
           <div
             ref={editorRef}
             contentEditable={previewMode === 'edit'}
             suppressContentEditableWarning
-            onInput={handleContentSync}
+            onInput={() => {
+              saveEditorSelection();
+              handleContentSync();
+            }}
+            onKeyUp={saveEditorSelection}
+            onMouseUp={saveEditorSelection}
+            onTouchEnd={saveEditorSelection}
+            onSelect={saveEditorSelection}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             data-placeholder="Digite sua anotação aqui... Use a barra acima para formatar (títulos, negrito, itálico, listas, tarefas)."
             className={`wysiwyg-content min-h-[320px] pb-10 ${
               previewMode === 'preview' ? 'cursor-default select-text' : 'cursor-text'
             }`}
           />
+
+          {previewMode === 'edit' && selectedImg && (
+            <ImageResizeOverlay
+              imageElement={selectedImg}
+              scrollContainerRef={scrollContainerRef}
+              onResize={() => {
+                handleContentSync();
+              }}
+              onOpenFullscreen={() => {
+                setFullscreenImage({
+                  src: selectedImg.src,
+                  alt: selectedImg.alt || 'Imagem da anotação',
+                });
+              }}
+              onRemove={() => {
+                selectedImg.remove();
+                setSelectedImg(null);
+                handleContentSync();
+                void NativeBridge.hapticLightImpact();
+              }}
+              onClose={() => setSelectedImg(null)}
+            />
+          )}
+
+          {previewMode === 'preview' && (
+            <NotePreviewImageButtons
+              editorRef={editorRef}
+              scrollContainerRef={scrollContainerRef}
+              onOpenFullscreen={(src, alt) => {
+                setFullscreenImage({ src, alt });
+              }}
+            />
+          )}
         </div>
+
+        {/* Modal de visualização de imagem em tela cheia */}
+        <ImageViewerModal
+          isOpen={!!fullscreenImage}
+          src={fullscreenImage?.src ?? null}
+          alt={fullscreenImage?.alt}
+          onClose={() => setFullscreenImage(null)}
+        />
       </div>
     </div>
   );
